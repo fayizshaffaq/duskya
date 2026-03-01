@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Dusky TUI Engine - Master v4.3.0 (Ultimate Hyprland 0.54 Edition)
+# Dusky TUI Engine - Master v4.4.0 (Ultimate Hyprland 0.54 Edition)
 # -----------------------------------------------------------------------------
 # Target: Arch Linux / Hyprland / UWSM / Wayland
 #
@@ -22,7 +22,7 @@ declare -r EDIT_DIR="${HYPR_DIR}/edit_here/source"
 declare -r CONFIG_FILE="${EDIT_DIR}/workspace_rules.conf"
 
 declare -r APP_TITLE="Dusky Workspace Manager"
-declare -r APP_VERSION="v4.3.0 (debounce_fix)"
+declare -r APP_VERSION="v4.4.0 (Production)"
 
 # Dimensions & Layout
 declare -ri MAX_DISPLAY_ROWS=14
@@ -64,28 +64,26 @@ register_items() {
     register 2 "1-Win Border"    '$smart_border|int||0|10|1' "0"
 }
 
-# Post-Write Hook: Sets deferred reload flag (flushed when input goes idle)
+# --- CHANGE 1 of 4: post_write_action sets flag instead of blocking ---
 post_write_action() {
     _NEEDS_RELOAD=1
 }
 
-# Deferred Reload: Applies changes to Hyprland in a single batch
+# --- CHANGE 2 of 4: New deferred reload function (non-blocking) ---
 _flush_reload() {
     if (( _NEEDS_RELOAD == 0 )); then return 0; fi
     _NEEDS_RELOAD=0
 
     if command -v hyprctl &>/dev/null; then
-        # 1. Always reload to apply base config changes & clear old IPC rules
-        hyprctl reload >/dev/null 2>&1 || :
-
-        # 2. Extract the Ephemeral State directly from the active cache
         local eph_val="${CONFIG_CACHE['$ephemeral_enabled|']:-false}"
         local eph_layout="${CONFIG_CACHE['$ephemeral_layout|']:-dwindle}"
-
-        # 3. If Active, inject the global override directly into the IPC (Memory)
-        if [[ "$eph_val" == "true" ]]; then
-            hyprctl keyword workspace "r[1-99], layout:$eph_layout" >/dev/null 2>&1 || :
-        fi
+        (
+            hyprctl reload || true
+            if [[ "$eph_val" == "true" ]]; then
+                hyprctl keyword workspace "r[1-99], layout:$eph_layout" || true
+            fi
+        ) </dev/null &>/dev/null &
+        disown 2>/dev/null || :
     fi
 }
 
@@ -139,7 +137,7 @@ declare -i PARENT_SCROLL=0
 # Temp file global
 declare _TMPFILE=""
 
-# Deferred reload flag
+# --- CHANGE 3 of 4: Deferred reload state ---
 declare -i _NEEDS_RELOAD=0
 
 # --- Click Zones for Arrows ---
@@ -201,7 +199,6 @@ ensure_config_exists() {
                 printf '$ws%d_bordersize = 2\n' "$i"
                 printf '$ws%d_gapsin = 6\n' "$i"
                 printf '$ws%d_gapsout = 12\n' "$i"
-                # Strict adherence to Hyprland 0.54 layoutopt architecture
                 printf 'workspace = %d, layout:$ws%d_layout, persistent:$ws%d_persistent, layoutopt:orientation:$ws%d_master_orient, layoutopt:direction:$ws%d_scroll_dir, bordersize:$ws%d_bordersize, gapsin:$ws%d_gapsin, gapsout:$ws%d_gapsout\n\n' "$i" "$i" "$i" "$i" "$i" "$i" "$i" "$i"
             done
         } > "${CONFIG_FILE}"
@@ -1136,19 +1133,21 @@ main() {
     trap 'draw_ui' WINCH
 
     local key
+    
+    # --- CHANGE 4 of 4: Debounce inner loop (300ms idle before reload) ---
     while true; do
         draw_ui
-        if ! IFS= read -rsn1 key; then continue; fi
-        handle_input_router "$key"
-        # Deferred reload: when a value change is pending, drain all buffered
-        # keystrokes first (file writes are instant), then fire hyprctl reload
-        # exactly once. This prevents the blocking IPC call from causing stdin
-        # buffer buildup and the "drag" effect when holding a key.
+        
         if (( _NEEDS_RELOAD )); then
-            while IFS= read -rsn1 -t 0.005 key 2>/dev/null; do
+            if IFS= read -rsn1 -t 0.3 key; then
                 handle_input_router "$key"
-            done
-            _flush_reload
+            else
+                _flush_reload
+            fi
+        else
+            if IFS= read -rsn1 key; then
+                handle_input_router "$key"
+            fi
         fi
     done
 }
