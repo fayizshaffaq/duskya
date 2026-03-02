@@ -35,26 +35,24 @@ declare -ri HEADER_ROWS=4
 declare -ri TAB_ROW=3
 declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 
-declare -ra TABS=("Global" "Workspaces")
+declare -ra TABS=("Workspaces" "Global")
 
 # Item Registration
 register_items() {
-    # Tab 0: Global Rules & Ephemeral Override
-    register 0 "Fallback Layout (WS 11+)" '$global_layout|cycle||dwindle,master,monocle,scrolling||' "dwindle"
-    
-    # Ephemeral State (Resets on reboot)
-    register 0 "Eph. Override Layout"     '$ephemeral_layout|cycle||dwindle,master,monocle,scrolling||' "monocle"
-    register 0 "Eph. Override Active"     '$ephemeral_enabled|bool||||' "false"
-    
-    # Tab 1: Workspaces (1 through 10 Submenus)
+    # Tab 0: Workspaces (1 through 10 Submenus)
     local i
     for i in {1..10}; do
-        register 1 "Workspace $i" "ws_${i}|menu||||" ""
+        register 0 "Workspace $i" "ws_${i}|menu||||" ""
         register_child "ws_${i}" "Layout"        "\$ws${i}_layout|cycle||dwindle,master,monocle,scrolling||" "dwindle"
         register_child "ws_${i}" "Persistent"    "\$ws${i}_persistent|bool||||" "false"
         register_child "ws_${i}" "Master Orient" "\$ws${i}_master_orient|cycle||left,right,top,bottom,center||" "left"
         register_child "ws_${i}" "Scroll Dir"    "\$ws${i}_scroll_dir|cycle||right,left,up,down||" "right"
     done
+
+    # Tab 1: Global Rules & Temporary Overrides
+    register 1 "Temp Global Override Layout" '$ephemeral_layout|cycle||dwindle,master,monocle,scrolling||' "monocle"
+    register 1 "Temp Global Override State"  '$ephemeral_enabled|bool||||' "false"
+    register 1 "Fallback Layout (WS 11+)"    '$global_layout|cycle||dwindle,master,monocle,scrolling||' "dwindle"
 }
 
 # --- CHANGE 1 of 4: post_write_action sets flag instead of blocking ---
