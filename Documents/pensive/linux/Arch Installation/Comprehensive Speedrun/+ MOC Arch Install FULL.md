@@ -40,7 +40,7 @@
 - [[#34. Tune Snapper Settings]]
 - [[#35. Configure snap-pac]]
 - [[#36. Allow Your User to Use Snapper]]
-- [[#37. BTRFS Quotas]]
+- [[#37. Disable BTRFS Quotas (Performance Optimization)]]
 - [[#38. Enable Snapper Services]]
 - [[#39. Kernel Backup Pacman Hook — Rollback Safety Net]]
 - [[#40. Test — Create and Verify a Snapshot]]
@@ -312,13 +312,10 @@ cfdisk /dev/sdX
 >
 > | # | Size | Type (cfdisk) | Purpose |
 > |---|---|---|---|
-> | 1 | `1M` | **BIOS boot** | Required *only* if booting via Legacy BIOS/CSM |
-> | 2 | `1G` | **EFI System** | ESP — unencrypted boot partition (used by both UEFI and BIOS) |
-> | 3 | *remainder* | **Linux filesystem** | LUKS2 encrypted root |
+> | 1 | `1G` | **EFI System** | ESP — unencrypted boot partition (UEFI) |
+> | 2 | *remainder* | **Linux filesystem** | LUKS2 encrypted root |
 >
 > Write and quit.
-
-
 
 *Verify the partitions*
 
@@ -946,14 +943,6 @@ mkdir -p /boot/EFI/BOOT && cp /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX
 > [!note]- Why `EFI/BOOT/BOOTX64.EFI`?
 > This is the UEFI **fallback** boot path. The firmware will find and boot it even without a custom UEFI boot entry — most resilient option.
 
-#### 25b-2. Optional: Deploy Limine for Legacy BIOS
-> [!tip] **Supporting older hardware?** > If your system is running Legacy BIOS/CSM instead of UEFI, you must write Limine to the Master Boot Record (MBR) and the 1MB `BIOS boot` partition you created in Step 7. 
-> 
-> *(It is perfectly safe to do this alongside the UEFI deployment above to create a universal, hybrid-bootable drive).*
-
-```bash
-sudo limine bios-install /dev/sdX
-```
 
 #### 25c. Create the Limine Configuration
 
@@ -1077,7 +1066,74 @@ Exec = /usr/bin/cp /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI
 EOF
 ```
 
+#### 25f. Secure Boot Implementation (Evil Maid Protection)
+
+> [!warning] **BIOS Setup Required First**
+> 
+> Before executing these commands, your motherboard must be in "Setup Mode". This usually requires you to go into your BIOS/UEFI, **Disable Secure Boot**, and select **Clear all Secure Boot Keys** (or "Restore Factory Keys" depending on your vendor).
+
+_Install the secure boot key manager_
+
+```
+pacman -S --needed sbctl
+```
+
+_Verify the system is in Setup Mode_
+
+```
+sbctl status
+```
+
+> [!note] You should see `Setup Mode: ✓ Enabled`. If it says disabled, your keys were not properly cleared in the BIOS.
+
+_Create your custom secure boot keys_
+
+```
+sbctl create-keys
+```
+
+_Enroll the custom keys into your UEFI firmware_
+
+```
+sbctl enroll-keys -m
+```
+
+_Sign the Limine EFI binary_
+
+```bash
+sbctl sign -s /boot/EFI/BOOT/BOOTX64.EFI
+```
+>[!warning] Architectural Limitation: Kernel Verification
+> Because Limine boots the kernel using protocol: linux, it loads the kernel file directly without verifying its PE/COFF cryptographic signature against the UEFI keys.
+> This setup ensures the motherboard validates the Limine bootloader (BOOTX64.EFI), preventing straightforward tampering of the EFI partition. However, true end-to-end Secure Boot requires migrating to Unified Kernel Images (UKIs) later.
+
+> [!note]- What the -s flag does
+> Passing -s tells sbctl to save this file path to its internal database. The pacman hook we create next will automatically re-sign the Limine binary whenever the limine package is upgraded.
+
+#### 25g. Update the Limine Pacman Hook for Secure Boot
+
+> [!important] In Step 25e, we created a hook to update the Limine EFI binary. We must overwrite it so the new binary gets signed automatically on update, otherwise, a bootloader update will break your Secure Boot chain.
+
+```
+cat > /etc/pacman.d/hooks/limine-update.hook << 'EOF'
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = limine
+
+[Action]
+Description = Deploying and signing updated Limine EFI binary...
+When = PostTransaction
+Exec = /usr/bin/bash -c '/usr/bin/cp /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI && /usr/bin/sbctl sign -s /boot/EFI/BOOT/BOOTX64.EFI'
+EOF
+```
+
+> [!tip] **Final Step:** After you finish the rest of this installation guide and reboot your system for the first time, go back into your BIOS and **Enable Secure Boot**. Your system will now cryptographically reject any boot binaries not signed by your custom keys.
+
+
 - [ ] Status
+
 
 ---
 ### 26. Fallback Disk-Based Swap File
@@ -1456,23 +1512,20 @@ sudo btrfs subvolume list / | grep -E 'snapshots'
 
 ### 34. Tune Snapper Settings
 
-> [!info] **Strategy:** No automatic timeline snapshots. Snapshots are created only by `snap-pac` (on pacman operations) or manually by you. Maximum control, no accumulation.
+> [!info] **Strategy:** No automatic timeline snapshots. Snapshots are created only by `snap-pac` (on pacman operations) or manually by you. Maximum control, no accumulation. We use strict count-based retention (keeping the last 10 snapshots) to avoid the I/O penalty of space-based calculations.
 
-**Recommended** (one-liner via SSH)
+**Recommended** (one-liners via SSH)
 
+*Configure the Root subvolume:*
 ```bash
-for cfg in root home; do
-  sudo sed -i \
-    -e 's/^TIMELINE_CREATE=.*/TIMELINE_CREATE="no"/' \
-    -e 's/^NUMBER_LIMIT=.*/NUMBER_LIMIT="5"/' \
-    -e 's/^NUMBER_LIMIT_IMPORTANT=.*/NUMBER_LIMIT_IMPORTANT="5"/' \
-    -e 's/^SPACE_LIMIT=.*/SPACE_LIMIT="0.3"/' \
-    -e 's/^FREE_LIMIT=.*/FREE_LIMIT="0.3"/' \
-    /etc/snapper/configs/$cfg
-done
+sudo sed -i -e 's/^TIMELINE_CREATE=.*/TIMELINE_CREATE="no"/' -e 's/^NUMBER_LIMIT=.*/NUMBER_LIMIT="10"/' -e 's/^NUMBER_LIMIT_IMPORTANT=.*/NUMBER_LIMIT_IMPORTANT="5"/' -e 's/^SPACE_LIMIT=.*/SPACE_LIMIT="0"/' -e 's/^FREE_LIMIT=.*/FREE_LIMIT="0"/' /etc/snapper/configs/root
 ```
 
-**OR** edit each file manually
+*Configure the Home subvolume:*
+```bash
+sudo sed -i -e 's/^TIMELINE_CREATE=.*/TIMELINE_CREATE="no"/' -e 's/^NUMBER_LIMIT=.*/NUMBER_LIMIT="10"/' -e 's/^NUMBER_LIMIT_IMPORTANT=.*/NUMBER_LIMIT_IMPORTANT="5"/' -e 's/^SPACE_LIMIT=.*/SPACE_LIMIT="0"/' -e 's/^FREE_LIMIT=.*/FREE_LIMIT="0"/' /etc/snapper/configs/home
+```
+OR edit each file manually
 
 ```bash
 sudo nvim /etc/snapper/configs/root
@@ -1482,35 +1535,26 @@ sudo nvim /etc/snapper/configs/root
 sudo nvim /etc/snapper/configs/home
 ```
 
-> [!note] **Set these values in both files:**
-> ```
-> TIMELINE_CREATE="no"
-> NUMBER_LIMIT="5"
-> NUMBER_LIMIT_IMPORTANT="5"
-> SPACE_LIMIT="0.3"
-> FREE_LIMIT="0.3"
-> ```
+>[!note] **Set these values in both files:**
+>
+>```ini
+>TIMELINE_CREATE="no"
+>NUMBER_LIMIT="10"
+>NUMBER_LIMIT_IMPORTANT="5"
+>SPACE_LIMIT="0"
+>FREE_LIMIT="0"
+>```
 
 > [!note]- What these settings mean
 >
 > | Setting | Value | Meaning |
 > |---|---|---|
-> | `TIMELINE_CREATE` | `"no"` | No automatic hourly/daily/weekly/monthly snapshots |
-> | `NUMBER_LIMIT` | `"5"` | Keep at most 5 "number" type snapshots (pre/post pairs from `snap-pac`) |
-> | `NUMBER_LIMIT_IMPORTANT` | `"5"` | Keep at most 5 "important" snapshots (manually marked) |
-> | `SPACE_LIMIT` | `"0.3"` | Delete oldest snapshots if they consume >30% of filesystem space |
-> | `FREE_LIMIT` | `"0.3"` | Delete oldest snapshots if filesystem free space drops below 30% |
+> | `TIMELINE_CREATE` | `"no"` | No automatic hourly/daily snapshots (prevents silent disk fill-up). |
+> | `NUMBER_LIMIT` | `"10"` | Keep exactly the last 10 pre/post snapshots generated by `snap-pac`. |
+> | `NUMBER_LIMIT_IMPORTANT` | `"5"` | Keep exactly 5 manually created snapshots (using the `-c important` flag). |
+> | `SPACE_LIMIT` | `"0"` | Disabled. We disabled BTRFS quotas for maximum SSD performance, so space limits cannot be used. |
+> | `FREE_LIMIT` | `"0"` | Disabled. (Same reason as above). |
 
-> [!tip]- **If you DO want timeline snapshots**
-> Set `TIMELINE_CREATE="yes"` and configure:
-> ```
-> TIMELINE_LIMIT_HOURLY="5"
-> TIMELINE_LIMIT_DAILY="7"
-> TIMELINE_LIMIT_WEEKLY="2"
-> TIMELINE_LIMIT_MONTHLY="1"
-> TIMELINE_LIMIT_YEARLY="0"
-> ```
-> Also enable: `sudo systemctl enable --now snapper-timeline.timer`
 
 - [ ] Status
 
@@ -1550,25 +1594,16 @@ sudo sed -i "s/^ALLOW_USERS=.*/ALLOW_USERS=\"your_username\"/" /etc/snapper/conf
 - [ ] Status
 
 ---
+### 37. Disable BTRFS Quotas (Performance Optimization) 
 
-### 37. BTRFS Quotas *(Optional)*
+> [!important] **Why we disable quotas:**
+> BTRFS quotas (qgroups) allow Snapper to measure how much disk space snapshots are taking up. However, calculating these quotas requires intense filesystem tree searches. On systems with heavy write loads (like running virtual machines, compiling packages, or gaming), this creates severe I/O bottlenecks and system stutters.
+> 
+> Because we configured Snapper in Step 34 to use strict count-based limits (`NUMBER_LIMIT="10"`) instead of space limits, we can safely kill quotas entirely for maximum SSD performance.
 
-> [!warning] **Read before enabling.**
-> BTRFS quotas (`qgroups`) allow Snapper to use `SPACE_LIMIT` and `FREE_LIMIT` cleanup rules (set in Step 34). Without quotas, Snapper can only use `NUMBER_LIMIT` (count-based cleanup).
->
-> **Trade-off:** Quotas have historically caused performance overhead on write-heavy workloads. Kernel 6.7+ improved this, but some impact remains.
->
-> **Recommendation:** Enable quotas. If you notice performance issues (slow writes, system hangs during heavy libvirt VM I/O), disable them:
-> ```bash
-> sudo btrfs quota disable /
-> ```
-
+*Ensure quotas are disabled for the entire BTRFS filesystem:*
 ```bash
-sudo btrfs quota enable --simple /
-```
-
-```bash
-sudo btrfs qgroup show /
+sudo btrfs quota disable /
 ```
 
 - [ ] Status
@@ -1895,9 +1930,6 @@ reboot
 
 ```bash
 sudo mkdir -p /mnt/btrfs-root
-sudo mount -o subvolid=5 /dev/mapper/cryptroot /mnt/btrfs-root
-sudo btrfs subvolume delete /mnt/btrfs-root/@.broken
-sudo umount /mnt/btrfs-root
 ```
 
 ```bash
@@ -2140,6 +2172,7 @@ sudo systemctl enable --now snapper-cleanup.timer
 | `efibootmgr` | `core` | pacman (Step 25) | UEFI boot entries |
 | `snapper` | `extra` | pacman (Step 32) | Snapshot manager |
 | `snap-pac` | `extra` | pacman (Step 32) | Auto pacman snapshots |
+| `sbctl` | `extra` | pacman (Step 25f) | Secure Boot key manager |
 
 ---
 
@@ -2241,4 +2274,4 @@ sudo systemctl enable --now snapper-cleanup.timer
 > - ✅ Kernel backup safety net for safe rollbacks
 > - ✅ Two rollback methods (running system undochange, live USB full replacement)
 > - ✅ ZRAM primary swap + disk-based fallback swap
-> - ✅ Automatic snapshot cleanup with space-aware limits
+> - ✅ Automatic snapshot cleanup with predictable count-based retention
