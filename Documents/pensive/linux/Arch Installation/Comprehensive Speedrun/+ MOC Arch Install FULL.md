@@ -766,7 +766,7 @@ echo "LANG=en_US.UTF-8" > /etc/locale.conf
 **(replace with your desired hostname)**
 
 ```bash
-echo "your-hostname" > /etc/hostname
+echo "dusky" > /etc/hostname
 ```
 
 - [ ] Status
