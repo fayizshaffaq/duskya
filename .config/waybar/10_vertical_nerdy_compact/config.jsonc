@@ -204,8 +204,8 @@
             "format": "{}",
             "return-type": "json",
             "interval": 2,
-            "exec": "$HOME/user_scripts/audio/audio_routing_output_to_mic.py --waybar",
-            "on-click": "uwsm-app -- \"$HOME/user_scripts/audio/audio_routing_output_to_mic.py\""
+            "exec": "$HOME/user_scripts/audio/router/audio_routing_output_to_mic.py --waybar",
+            "on-click": "uwsm-app -- \"$HOME/user_scripts/audio/router/audio_routing_output_to_mic.py\""
         },
 
         "custom/network": {
