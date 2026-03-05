@@ -833,28 +833,30 @@ EDITOR=nvim visudo
 > 1. **`keyboard` moved before `autodetect`** — ensures keyboard modules are always included so you can type your LUKS passphrase
 > 2. **`sd-encrypt` added after `block`** — systemd-native LUKS decryption hook (must use this with `systemd` base hook, **not** the busybox `encrypt` hook)
 
-**Recommended** (one-liner via SSH)
+**Recommended** (drop-in file via SSH — Modern Arch Standard)
 
 ```bash
-sed -i \
-  -e 's/^MODULES=.*/MODULES=(btrfs)/' \
-  -e 's|^BINARIES=.*|BINARIES=(/usr/bin/btrfs)|' \
-  -e 's/^HOOKS=.*/HOOKS=(systemd keyboard autodetect microcode modconf kms sd-vconsole block sd-encrypt filesystems)/' \
-  /etc/mkinitcpio.conf
+mkdir -p /etc/mkinitcpio.conf.d && cat << 'EOF' > /etc/mkinitcpio.conf.d/10-arch-btrfs-luks.conf
+MODULES=(btrfs)
+BINARIES=(/usr/bin/btrfs)
+HOOKS=(systemd keyboard autodetect microcode modconf kms sd-vconsole block sd-encrypt filesystems)
+EOF
 ```
 
-**OR** manually edit
-
+OR manually create the drop-in
 ```bash
-nvim /etc/mkinitcpio.conf
+mkdir -p /etc/mkinitcpio.conf.d
+nvim /etc/mkinitcpio.conf.d/10-arch-btrfs-luks.conf
 ```
 
-> [!note] Set these three lines:
-> ```
+
+> [!note] Paste these exact three lines into the new file:
+> ```ini
 > MODULES=(btrfs)
 > BINARIES=(/usr/bin/btrfs)
 > HOOKS=(systemd keyboard autodetect microcode modconf kms sd-vconsole block sd-encrypt filesystems)
 > ```
+
 
 > [!note]- **HOOKS order explained**
 >
