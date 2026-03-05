@@ -952,8 +952,10 @@ mkdir -p /boot/EFI/BOOT && cp /usr/share/limine/BOOTX64.EFI /boot/EFI/BOOT/BOOTX
 
 ```bash
 cat > /boot/limine.conf << 'EOF'
-timeout: 5
-verbose: no
+timeout: 3
+default_entry: 2
+remember_last_entry: yes
+
 
 /Arch Linux
     protocol: linux
