@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Arch Linux (EFI + Btrfs root) | OverlayFS + snap-pac + limine-snapper-sync
+# Arch Linux (EFI + Btrfs root/home) | OverlayFS + snap-pac + limine-snapper-sync
 # Bash 5.3+
 
 set -Eeuo pipefail
@@ -279,6 +279,7 @@ install_snap_pac() {
 }
 
 verify_previous_setup() {
+    # Root checks
     findmnt -M /.snapshots >/dev/null 2>&1 || fatal "/.snapshots is not mounted. Run the Snapper isolation script first."
     sudo snapper -c root get-config >/dev/null 2>&1 || fatal "Snapper root config is missing or unusable."
 
@@ -289,11 +290,21 @@ verify_previous_setup() {
 
     [[ "$mounted_subvol" == "@snapshots" ]] || fatal "/.snapshots is mounted, but not from subvol=/@snapshots"
 
-    info "Verified Snapper isolated layout."
+    # Home checks
+    findmnt -M /home/.snapshots >/dev/null 2>&1 || fatal "/home/.snapshots is not mounted. Run the Snapper isolation script first."
+    sudo snapper -c home get-config >/dev/null 2>&1 || fatal "Snapper home config is missing or unusable."
+
+    local home_mounted_opts home_mounted_subvol
+    home_mounted_opts="$(findmnt -M /home/.snapshots -no OPTIONS 2>/dev/null || true)"
+    home_mounted_subvol="$(extract_subvol "$home_mounted_opts" || true)"
+    home_mounted_subvol="${home_mounted_subvol#/}"
+
+    [[ "$home_mounted_subvol" == "@home_snapshots" ]] || fatal "/home/.snapshots is mounted, but not from subvol=/@home_snapshots"
+
+    info "Verified Snapper isolated layout for root and home."
 }
 
 choose_overlay_hook() {
-    # FIX: Removed `get_effective_hooks` from here. It is now called in the parent scope.
     local hook
     for hook in "${EFFECTIVE_HOOKS[@]}"; do
         if [[ "$hook" == "systemd" ]]; then
@@ -318,7 +329,6 @@ configure_mkinitcpio_overlay_hook() {
     local -a final_hooks=()
     local tmp
 
-    # FIX: Call `get_effective_hooks` in the parent shell so the array persists.
     get_effective_hooks
     target_hook="$(choose_overlay_hook)"
     verify_overlay_hook_available "$target_hook"
@@ -403,15 +413,16 @@ configure_snap_pac() {
 
     backup_file "$ini"
     set_ini_key "$ini" root snapshot yes
-    set_ini_key "$ini" home snapshot no
+    set_ini_key "$ini" home snapshot yes
 
-    info "Configured snap-pac."
+    info "Configured snap-pac for root and home."
 }
 
 baseline_snapshot_exists() {
-    local desc="$1"
+    local config="$1"
+    local desc="$2"
 
-    sudo snapper -c root list | awk -F'|' -v desc="$desc" '
+    sudo snapper -c "$config" list | awk -F'|' -v desc="$desc" '
         NF >= 7 {
             field = $7
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", field)
@@ -428,13 +439,19 @@ baseline_snapshot_exists() {
 create_post_config_baseline_snapshot() {
     local desc="Baseline after Limine + Snapper integration"
 
-    if baseline_snapshot_exists "$desc"; then
-        info "Baseline snapshot already exists."
-        return 0
+    if ! baseline_snapshot_exists "root" "$desc"; then
+        sudo snapper -c root create -t single -c important -d "$desc"
+        info "Created baseline root snapshot."
+    else
+        info "Baseline root snapshot already exists."
     fi
 
-    sudo snapper -c root create -t single -c important -d "$desc"
-    info "Created baseline root snapshot."
+    if ! baseline_snapshot_exists "home" "$desc"; then
+        sudo snapper -c home create -t single -c important -d "$desc"
+        info "Created baseline home snapshot."
+    else
+        info "Baseline home snapshot already exists."
+    fi
 }
 
 enable_services_and_sync() {
@@ -462,6 +479,7 @@ preflight_checks() {
 
     [[ -d /sys/firmware/efi ]] || fatal "System is not booted in EFI mode."
     [[ "$(stat -f -c %T /)" == "btrfs" ]] || fatal "Root filesystem is not Btrfs."
+    [[ "$(stat -f -c %T /home)" == "btrfs" ]] || fatal "/home is not Btrfs."
 
     sudo -v || fatal "Cannot obtain sudo privileges."
     (

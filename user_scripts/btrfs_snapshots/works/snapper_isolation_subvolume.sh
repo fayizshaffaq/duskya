@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Arch Linux (Btrfs root) | Root Snapper isolated @snapshots setup
+# Arch Linux (Btrfs root) | Root & Home Snapper isolated snapshots setup
 # Bash 5.3+
 
 set -Eeuo pipefail
@@ -150,25 +150,27 @@ path_is_btrfs_subvolume() {
 }
 
 verify_snapshots_mount() {
+    local mount_target="$1"
+    local expected_subvol="$2"
     local root_uuid snap_uuid mounted_opts mounted_subvol
 
     root_uuid="$(get_root_uuid)"
     [[ -n "$root_uuid" ]] || fatal "Could not determine the Btrfs UUID for /"
 
-    findmnt -M /.snapshots >/dev/null 2>&1 || fatal "/.snapshots is not mounted."
+    findmnt -M "$mount_target" >/dev/null 2>&1 || fatal "${mount_target} is not mounted."
 
-    snap_uuid="$(findmnt -M /.snapshots -no UUID 2>/dev/null || true)"
-    [[ -n "$snap_uuid" ]] || fatal "Could not determine the filesystem UUID for /.snapshots"
-    [[ "$snap_uuid" == "$root_uuid" ]] || fatal "/.snapshots is mounted from a different filesystem."
+    snap_uuid="$(findmnt -M "$mount_target" -no UUID 2>/dev/null || true)"
+    [[ -n "$snap_uuid" ]] || fatal "Could not determine the filesystem UUID for ${mount_target}"
+    [[ "$snap_uuid" == "$root_uuid" ]] || fatal "${mount_target} is mounted from a different filesystem."
 
-    mounted_opts="$(findmnt -M /.snapshots -no OPTIONS 2>/dev/null || true)"
+    mounted_opts="$(findmnt -M "$mount_target" -no OPTIONS 2>/dev/null || true)"
     mounted_subvol="$(extract_subvol "$mounted_opts" || true)"
     mounted_subvol="${mounted_subvol#/}"
 
-    [[ "$mounted_subvol" == "@snapshots" ]] || fatal "/.snapshots is mounted, but not from subvol=/@snapshots"
+    [[ "$mounted_subvol" == "$expected_subvol" ]] || fatal "${mount_target} is mounted, but not from subvol=/${expected_subvol}"
 
-    sudo chmod 750 /.snapshots
-    info "/.snapshots is mounted from @snapshots"
+    sudo chmod 750 "$mount_target"
+    info "${mount_target} is mounted from ${expected_subvol}"
 }
 
 install_packages() {
@@ -181,22 +183,26 @@ post_install_checks() {
     require_cmd systemctl
 }
 
-ensure_root_snapper_config() {
-    if sudo snapper -c root get-config >/dev/null 2>&1; then
-        info "Snapper root config already exists."
+ensure_snapper_config() {
+    local config_name="$1"
+    local config_path="$2"
+
+    if sudo snapper -c "$config_name" get-config >/dev/null 2>&1; then
+        info "Snapper ${config_name} config already exists."
         return 0
     fi
 
-    if mountpoint -q /.snapshots; then
-        fatal "Snapper root config is missing, but /.snapshots is already a mountpoint. Refusing automatic recovery."
+    if mountpoint -q "${config_path}/.snapshots"; then
+        fatal "Snapper ${config_name} config is missing, but ${config_path}/.snapshots is already a mountpoint."
     fi
 
-    sudo snapper -c root create-config /
-    sudo snapper -c root get-config >/dev/null 2>&1 || fatal "Snapper root config was not created correctly."
-    info "Created Snapper root config."
+    sudo snapper -c "$config_name" create-config "$config_path"
+    sudo snapper -c "$config_name" get-config >/dev/null 2>&1 || fatal "Snapper ${config_name} config was not created correctly."
+    info "Created Snapper ${config_name} config."
 }
 
 ensure_top_level_snapshots_subvolume() {
+    local subvol_target="$1"
     local root_source tmp_mnt mounted=false
 
     root_source="$(get_root_source)"
@@ -214,15 +220,15 @@ ensure_top_level_snapshots_subvolume() {
     sudo mount -o subvolid=5 "$root_source" "$tmp_mnt"
     mounted=true
 
-    if [[ -e "${tmp_mnt}/@snapshots" ]]; then
-        if sudo btrfs subvolume show "${tmp_mnt}/@snapshots" >/dev/null 2>&1; then
-            info "Top-level subvolume @snapshots already exists."
+    if [[ -e "${tmp_mnt}/${subvol_target}" ]]; then
+        if sudo btrfs subvolume show "${tmp_mnt}/${subvol_target}" >/dev/null 2>&1; then
+            info "Top-level subvolume ${subvol_target} already exists."
         else
-            fatal "Top-level path @snapshots exists, but it is not a Btrfs subvolume."
+            fatal "Top-level path ${subvol_target} exists, but it is not a Btrfs subvolume."
         fi
     else
-        sudo btrfs subvolume create "${tmp_mnt}/@snapshots"
-        info "Created top-level subvolume @snapshots."
+        sudo btrfs subvolume create "${tmp_mnt}/${subvol_target}"
+        info "Created top-level subvolume ${subvol_target}."
     fi
 
     trap - RETURN
@@ -230,34 +236,39 @@ ensure_top_level_snapshots_subvolume() {
 }
 
 prepare_snapshots_mountpoint() {
-    sudo mkdir -p /.snapshots
+    local mount_target="$1"
+    local expected_subvol="$2"
 
-    if mountpoint -q /.snapshots; then
-        verify_snapshots_mount
+    sudo mkdir -p "$mount_target"
+
+    if mountpoint -q "$mount_target"; then
+        verify_snapshots_mount "$mount_target" "$expected_subvol"
         return 0
     fi
 
-    if [[ ! -d /.snapshots ]]; then
-        fatal "/.snapshots exists, but it is not a directory."
+    if [[ ! -d "$mount_target" ]]; then
+        fatal "${mount_target} exists, but it is not a directory."
     fi
 
-    if path_is_btrfs_subvolume /.snapshots; then
-        if dir_has_entries /.snapshots; then
-            fatal "Nested /.snapshots is a populated Btrfs subvolume. Refusing destructive migration."
+    if path_is_btrfs_subvolume "$mount_target"; then
+        if dir_has_entries "$mount_target"; then
+            fatal "Nested ${mount_target} is a populated Btrfs subvolume. Refusing destructive migration."
         fi
 
-        sudo btrfs subvolume delete /.snapshots
-        sudo mkdir -p /.snapshots
-        info "Removed empty nested /.snapshots subvolume."
+        sudo btrfs subvolume delete "$mount_target"
+        sudo mkdir -p "$mount_target"
+        info "Removed empty nested ${mount_target} subvolume."
         return 0
     fi
 
-    if dir_has_entries /.snapshots; then
-        fatal "/.snapshots is a non-empty directory. Refusing to mount over existing contents."
+    if dir_has_entries "$mount_target"; then
+        fatal "${mount_target} is a non-empty directory. Refusing to mount over existing contents."
     fi
 }
 
-ensure_fstab_entry_for_root_snapshots() {
+ensure_fstab_entry_for_snapshots() {
+    local mount_target="$1"
+    local subvol_target="$2"
     local fs_uuid root_opts cleaned_opts mount_opts newline tmp
 
     fs_uuid="$(get_root_uuid)"
@@ -268,14 +279,14 @@ ensure_fstab_entry_for_root_snapshots() {
 
     mount_opts="$cleaned_opts"
     [[ -n "$mount_opts" ]] && mount_opts+=","
-    mount_opts+="subvol=/@snapshots"
+    mount_opts+="subvol=/${subvol_target}"
 
-    newline="UUID=${fs_uuid} /.snapshots btrfs ${mount_opts} 0 0"
+    newline="UUID=${fs_uuid} ${mount_target} btrfs ${mount_opts} 0 0"
 
     backup_file /etc/fstab
     tmp="$(mktemp)"
 
-    awk -v mp='/.snapshots' -v newline="$newline" '
+    awk -v mp="$mount_target" -v newline="$newline" '
         BEGIN { done = 0 }
         /^[[:space:]]*#/ { print; next }
         NF >= 2 && $2 == mp {
@@ -297,29 +308,34 @@ ensure_fstab_entry_for_root_snapshots() {
     rm -f "$tmp"
 
     sudo systemctl daemon-reload
-    info "Ensured /.snapshots entry in /etc/fstab"
+    info "Ensured ${mount_target} entry in /etc/fstab"
 }
 
-mount_root_snapshots() {
-    sudo mkdir -p /.snapshots
+mount_snapshots() {
+    local mount_target="$1"
+    local expected_subvol="$2"
 
-    if mountpoint -q /.snapshots; then
-        verify_snapshots_mount
+    sudo mkdir -p "$mount_target"
+
+    if mountpoint -q "$mount_target"; then
+        verify_snapshots_mount "$mount_target" "$expected_subvol"
         return 0
     fi
 
-    sudo mount /.snapshots
-    verify_snapshots_mount
+    sudo mount "$mount_target"
+    verify_snapshots_mount "$mount_target" "$expected_subvol"
 }
 
 verify_snapper_works() {
-    sudo snapper -c root get-config >/dev/null 2>&1 || fatal "Snapper root config is not usable."
-    sudo snapper -c root list >/dev/null 2>&1 || fatal "Snapper cannot access the root snapshot set."
-    info "Snapper root config is working."
+    local config_name="$1"
+    sudo snapper -c "$config_name" get-config >/dev/null 2>&1 || fatal "Snapper ${config_name} config is not usable."
+    sudo snapper -c "$config_name" list >/dev/null 2>&1 || fatal "Snapper cannot access the ${config_name} snapshot set."
+    info "Snapper ${config_name} config is working."
 }
 
 tune_snapper() {
-    sudo snapper -c root set-config \
+    local config_name="$1"
+    sudo snapper -c "$config_name" set-config \
         TIMELINE_CREATE="no" \
         NUMBER_CLEANUP="yes" \
         NUMBER_LIMIT="10" \
@@ -328,7 +344,7 @@ tune_snapper() {
         FREE_LIMIT="0.0"
 
     sudo btrfs quota disable / 2>/dev/null || true
-    info "Applied Snapper retention settings for root."
+    info "Applied Snapper retention settings for ${config_name}."
 }
 
 preflight_checks() {
@@ -346,6 +362,7 @@ preflight_checks() {
     require_cmd date
 
     [[ "$(stat -f -c %T /)" == "btrfs" ]] || fatal "Root filesystem is not Btrfs."
+    [[ "$(stat -f -c %T /home)" == "btrfs" ]] || fatal "/home is not Btrfs."
 
     sudo -v || fatal "Cannot obtain sudo privileges."
     (
@@ -361,10 +378,21 @@ preflight_checks
 
 execute "Install Snapper packages" install_packages
 post_install_checks
-execute "Create Snapper root config" ensure_root_snapper_config
-execute "Create top-level @snapshots subvolume" ensure_top_level_snapshots_subvolume
-execute "Prepare /.snapshots mountpoint safely" prepare_snapshots_mountpoint
-execute "Write /.snapshots mount to /etc/fstab" ensure_fstab_entry_for_root_snapshots
-execute "Mount /.snapshots from @snapshots" mount_root_snapshots
-execute "Verify Snapper can use the isolated snapshot layout" verify_snapper_works
-execute "Apply Snapper cleanup settings" tune_snapper
+
+# --- ROOT SNAPSHOT CONFIG ---
+execute "Create Snapper root config" ensure_snapper_config "root" "/"
+execute "Create top-level @snapshots subvolume" ensure_top_level_snapshots_subvolume "@snapshots"
+execute "Prepare /.snapshots mountpoint safely" prepare_snapshots_mountpoint "/.snapshots" "@snapshots"
+execute "Write /.snapshots mount to /etc/fstab" ensure_fstab_entry_for_snapshots "/.snapshots" "@snapshots"
+execute "Mount /.snapshots from @snapshots" mount_snapshots "/.snapshots" "@snapshots"
+execute "Verify Snapper can use the root snapshot layout" verify_snapper_works "root"
+execute "Apply Snapper cleanup settings (root)" tune_snapper "root"
+
+# --- HOME SNAPSHOT CONFIG ---
+execute "Create Snapper home config" ensure_snapper_config "home" "/home"
+execute "Create top-level @home_snapshots subvolume" ensure_top_level_snapshots_subvolume "@home_snapshots"
+execute "Prepare /home/.snapshots mountpoint safely" prepare_snapshots_mountpoint "/home/.snapshots" "@home_snapshots"
+execute "Write /home/.snapshots mount to /etc/fstab" ensure_fstab_entry_for_snapshots "/home/.snapshots" "@home_snapshots"
+execute "Mount /home/.snapshots from @home_snapshots" mount_snapshots "/home/.snapshots" "@home_snapshots"
+execute "Verify Snapper can use the home snapshot layout" verify_snapper_works "home"
+execute "Apply Snapper cleanup settings (home)" tune_snapper "home"
