@@ -124,7 +124,6 @@ clean_mount_opts() {
     fi
 }
 
-# FIXED: Replaced destructive rmdir check with a read-only find command
 dir_is_empty() {
     local entries
     entries="$(sudo find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
@@ -157,7 +156,10 @@ post_install_checks() { require_cmd btrfs; require_cmd snapper; require_cmd syst
 
 ensure_snapper_config() {
     local config_name="$1" config_path="$2"
-    sudo snapper -c "$config_name" get-config >/dev/null 2>&1 && { info "Snapper ${config_name} exists."; return 0; }
+    if sudo snapper -c "$config_name" get-config >/dev/null 2>&1; then
+        info "Snapper ${config_name} exists."
+        return 0
+    fi
     mountpoint -q "${config_path}/.snapshots" && fatal "${config_path}/.snapshots is already a mountpoint."
 
     sudo snapper -c "$config_name" create-config "$config_path"
@@ -222,7 +224,6 @@ ensure_fstab_entry_for_snapshots() {
     tmp="$(mktemp)"
     ACTIVE_TEMP_FILES+=("$tmp")
 
-    # FIXED: Extract and isolate field 2 locally to prevent awk from rebuilding and corrupting $0
     awk -v mp="$canonical_target" -v newline="$newline" '
         BEGIN { done = 0 }
         /^[[:space:]]*#/ || NF < 2 { print $0; next }
@@ -272,6 +273,11 @@ quiesce_snapper() {
     fi
 }
 
+apply_global_btrfs_tuning() {
+    sudo btrfs quota disable / 2>/dev/null || true
+    info "Applied global Btrfs tuning parameters."
+}
+
 preflight_checks() {
     (( EUID != 0 )) || fatal "Run as regular user with sudo."
     require_cmd sudo; require_cmd pacman; require_cmd findmnt; require_cmd awk; require_cmd realpath; require_cmd grep; require_cmd stat; require_cmd mktemp
@@ -302,4 +308,5 @@ execute "Mount /home/.snapshots" mount_snapshots "/home/.snapshots" "@home_snaps
 execute "Verify Snapper home" verify_snapper_works "home"
 execute "Tune Snapper home" tune_snapper "home"
 
-execute "Apply Global Btrfs Settings" apply_global_btrfs_tuning() { sudo btrfs quota disable / 2>/dev/null || true; }
+# FIXED: Function declaration moved outside the execute call
+execute "Apply Global Btrfs Settings" apply_global_btrfs_tuning

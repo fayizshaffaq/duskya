@@ -175,6 +175,8 @@ verify_previous_setup() {
 
     home_opts="$(findmnt -n -e -o OPTIONS -M /home/.snapshots 2>/dev/null || true)"
     [[ "$(extract_subvol "$home_opts" || true)" == "@home_snapshots" ]] || fatal "/home/.snapshots is not mounted from @home_snapshots."
+
+    info "Verified Snapper isolated layout for root and home."
 }
 
 configure_mkinitcpio_overlay_hook() {
@@ -191,7 +193,6 @@ configure_mkinitcpio_overlay_hook() {
     tmp="$(mktemp)"
     ACTIVE_TEMP_FILES+=("$tmp")
     
-    # THE HALLUCINATION FIX: Safe, exact Bash array manipulation logic
     cat <<EOF > "$tmp"
 # Managed by limine + snapper integration setup
 if [[ " \${HOOKS[*]} " != *" ${target_hook} "* ]]; then
@@ -208,13 +209,18 @@ fi
 EOF
 
     if [[ -f "$managed_file" ]] && cmp -s "$tmp" "$managed_file"; then
-        rm -f "$tmp"; ACTIVE_TEMP_FILES=("${ACTIVE_TEMP_FILES[@]/$tmp}"); return 0
+        rm -f "$tmp"; ACTIVE_TEMP_FILES=("${ACTIVE_TEMP_FILES[@]/$tmp}")
+        info "${target_hook} is already configured in ${managed_file}."
+        return 0
     fi
 
     sudo mkdir -p /etc/mkinitcpio.conf.d
     backup_file "$managed_file"
     atomic_write "$managed_file" "$tmp"
     rm -f "$tmp"; ACTIVE_TEMP_FILES=("${ACTIVE_TEMP_FILES[@]/$tmp}")
+    
+    # FIXED: Added logging back
+    info "Configured dynamic ${target_hook} injection in ${managed_file}"
 }
 
 rebuild_initramfs() { sudo limine-update; }
@@ -239,6 +245,10 @@ configure_sync_daemon() {
     if ! cmp -s "$tmp" "$conf_file"; then
         backup_file "$conf_file"
         atomic_write "$conf_file" "$tmp"
+        # FIXED: Added logging back
+        info "Configured limine-snapper-sync paths."
+    else
+        info "limine-snapper-sync paths are already up to date."
     fi
     rm -f "$tmp"; ACTIVE_TEMP_FILES=("${ACTIVE_TEMP_FILES[@]/$tmp}")
 }
@@ -265,7 +275,12 @@ configure_snap_pac() {
     ' "$ini" > "$tmp"
     
     if ! cmp -s "$tmp" "$ini"; then
-        backup_file "$ini"; atomic_write "$ini" "$tmp"
+        backup_file "$ini"
+        atomic_write "$ini" "$tmp"
+        # FIXED: Added logging back
+        info "Configured snap-pac for root and home."
+    else
+        info "snap-pac is already configured correctly."
     fi
     rm -f "$tmp"; ACTIVE_TEMP_FILES=("${ACTIVE_TEMP_FILES[@]/$tmp}")
 }
@@ -278,9 +293,13 @@ create_post_config_baseline_snapshot() {
     local desc="Baseline after Limine + Snapper integration"
     if ! baseline_snapshot_exists "root" "$desc"; then
         sudo snapper -c root create -t single -c important -d "$desc"
+        # FIXED: Added logging back
+        info "Created baseline root snapshot."
     fi
     if ! baseline_snapshot_exists "home" "$desc"; then
         sudo snapper -c home create -t single -c important -d "$desc"
+        # FIXED: Added logging back
+        info "Created baseline home snapshot."
     fi
 }
 
@@ -289,7 +308,7 @@ enable_services_and_sync() {
     sudo systemctl enable --now limine-snapper-sync.service
 
     if [[ "$(systemctl show -p Result --value limine-snapper-sync.service 2>/dev/null || true)" == "success" ]]; then
-        info "Boot menu sync completed."
+        info "Boot menu sync completed via systemd service."
     else
         sudo limine-snapper-sync || true
     fi
