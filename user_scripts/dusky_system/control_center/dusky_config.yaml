@@ -813,11 +813,11 @@ pages:
       on_toggle:
         enabled:
           type: exec
-          command: $HOME/user_scripts/audio/mono_audio_pipewire.sh
+          command: $HOME/user_scripts/audio/mono_audio_pipewire.py
           terminal: false
         disabled:
           type: exec
-          command: $HOME/user_scripts/audio/mono_audio_pipewire.sh
+          command: $HOME/user_scripts/audio/mono_audio_pipewire.py
           terminal: false
     - type: grid_card
       properties:
