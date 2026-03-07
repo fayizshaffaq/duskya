@@ -87,21 +87,7 @@ trap 'abort_with_signal SIGTERM 143' TERM
 # "bibata-cursor-theme-bin"
 
 declare -ar PACKAGES=(
-  "wlogout"
-  "adwaita-qt6"
-  "adwaita-qt5"
-  "otf-atkinson-hyperlegible-next"
-  "python-pywalfox"
-  "python-pyquery"
-  "hyprshade"
-  "hyprshutdown"
-  "waypaper"
-  "peaclock"
-  "tray-tui"
-  "wifitui-bin"
-  "xdg-terminal-exec"
   "papirus-icon-theme-git"
-# "fluent-icon-theme-git"
 )
 
 # Delay before auto-retrying
