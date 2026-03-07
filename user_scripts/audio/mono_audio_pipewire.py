@@ -14,20 +14,19 @@ Key properties:
     - rollback on failure
 """
 
-from __future__ import annotations
-
 import argparse
 import contextlib
 import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -57,14 +56,16 @@ NOTIFY_TIMEOUT_MS = 2000
 
 PULSEAPP_OWNER_MODULE_IDS = {4294967295, 18446744073709551615}
 
-SINK_INPUT_HEADER_RE = re.compile(r"^Sink Input #(\d+)$")
-NULL_SINK_ARG_RE = re.compile(rf"(?:^|\s)sink_name={re.escape(MONO_SINK_NAME)}(?:\s|$)")
-LOOPBACK_SOURCE_ARG_RE = re.compile(rf"(?:^|\s)source={re.escape(MONO_MONITOR_NAME)}(?:\s|$)")
+SINK_INPUT_HEADER_RE = re.compile(r"^\s*Sink Input #(\d+)$")
 
+type SinkRow = tuple[int, str]
+type SourceRow = tuple[int, str]
+type ModuleRow = tuple[int, str, str]
 
 # -----------------------------------------------------------------------------
 # Data structures
 # -----------------------------------------------------------------------------
+
 
 class Phase(StrEnum):
     ENABLING = "enabling"
@@ -73,6 +74,14 @@ class Phase(StrEnum):
 
 class MonoToggleError(RuntimeError):
     """Fatal mono toggle error."""
+
+
+class WaitTimeoutError(TimeoutError):
+    """Predicate did not become ready before the timeout."""
+
+    def __init__(self, last_error: Exception | None = None) -> None:
+        super().__init__("timed out")
+        self.last_error = last_error
 
 
 @dataclass(slots=True)
@@ -107,12 +116,21 @@ class MonoState:
 # Command helpers
 # -----------------------------------------------------------------------------
 
+
+def _decode_subprocess_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
+
+
 def run_command(
     *args: str,
     timeout: float = CMD_TIMEOUT,
     force_c_locale: bool = True,
 ) -> CommandResult:
-    env = os.environ.copy()
+    env = dict(os.environ)
     if force_c_locale:
         env["LC_ALL"] = "C"
         env["LANG"] = "C"
@@ -123,6 +141,8 @@ def run_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             env=env,
@@ -130,8 +150,8 @@ def run_command(
     except subprocess.TimeoutExpired as exc:
         return CommandResult(
             returncode=None,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            stdout=_decode_subprocess_output(exc.stdout),
+            stderr=_decode_subprocess_output(exc.stderr),
             timed_out=True,
         )
     except OSError as exc:
@@ -186,9 +206,17 @@ def ensure_runtime_dir() -> None:
         raise MonoToggleError(f"Runtime directory is not accessible: {RUNTIME_DIR}")
 
 
+def ensure_audio_server() -> None:
+    require_success(
+        run_command("pactl", "info", timeout=3.0),
+        "Failed to talk to pipewire-pulse",
+    )
+
+
 # -----------------------------------------------------------------------------
 # File helpers
 # -----------------------------------------------------------------------------
+
 
 def fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY
@@ -266,6 +294,8 @@ def load_state() -> MonoState | None:
 
     try:
         version = int(data.get("version", STATE_VERSION))
+        if version != STATE_VERSION:
+            raise ValueError(f"unsupported state version: {version}")
 
         phase_raw = str(data.get("phase", Phase.ACTIVE.value))
         try:
@@ -314,8 +344,9 @@ def clear_state() -> None:
 # Locking
 # -----------------------------------------------------------------------------
 
+
 @contextlib.contextmanager
-def instance_lock():
+def instance_lock() -> Iterator[None]:
     try:
         LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
@@ -339,6 +370,7 @@ def instance_lock():
 # Parsing helpers
 # -----------------------------------------------------------------------------
 
+
 def _as_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -346,10 +378,10 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-def split_short_line(line: str, maxsplit: int) -> list[str]:
+def split_short_table_line(line: str, maxsplit: int) -> list[str]:
     if "\t" in line:
-        return line.split("\t", maxsplit)
-    return line.split(None, maxsplit)
+        return [part.strip() for part in line.split("\t", maxsplit)]
+    return line.strip().split(None, maxsplit)
 
 
 def unique_ids(values: Iterable[int]) -> list[int]:
@@ -363,57 +395,75 @@ def unique_ids(values: Iterable[int]) -> list[int]:
     return result
 
 
+def parse_module_args(module_args: str) -> dict[str, str]:
+    if not module_args:
+        return {}
+
+    try:
+        tokens = shlex.split(module_args, posix=True)
+    except ValueError:
+        return {}
+
+    parsed: dict[str, str] = {}
+    for token in tokens:
+        key, sep, value = token.partition("=")
+        if sep:
+            parsed[key] = value
+    return parsed
+
+
 # -----------------------------------------------------------------------------
 # pactl queries
 # -----------------------------------------------------------------------------
 
-def list_sinks() -> list[tuple[int, str]]:
+
+def list_sinks() -> list[SinkRow]:
     output = require_success(
         run_command("pactl", "list", "sinks", "short"),
         "Failed to list sinks",
     )
-    sinks: list[tuple[int, str]] = []
+    sinks: list[SinkRow] = []
     for line in output.splitlines():
-        parts = split_short_line(line.strip(), 1)
+        parts = split_short_table_line(line, 4)
         if len(parts) < 2:
             continue
         sink_id = _as_int(parts[0])
-        sink_name = parts[1].strip()
+        sink_name = parts[1]
         if sink_id is not None and sink_name:
             sinks.append((sink_id, sink_name))
     return sinks
 
 
-def list_sources() -> list[tuple[int, str]]:
+def list_sources() -> list[SourceRow]:
     output = require_success(
         run_command("pactl", "list", "sources", "short"),
         "Failed to list sources",
     )
-    sources: list[tuple[int, str]] = []
+    sources: list[SourceRow] = []
     for line in output.splitlines():
-        parts = split_short_line(line.strip(), 1)
+        parts = split_short_table_line(line, 4)
         if len(parts) < 2:
             continue
         source_id = _as_int(parts[0])
-        source_name = parts[1].strip()
+        source_name = parts[1]
         if source_id is not None and source_name:
             sources.append((source_id, source_name))
     return sources
 
 
-def list_modules() -> list[tuple[int, str, str]]:
+def list_modules() -> list[ModuleRow]:
     output = require_success(
         run_command("pactl", "list", "modules", "short"),
         "Failed to list modules",
     )
-    modules: list[tuple[int, str, str]] = []
+    modules: list[ModuleRow] = []
     for line in output.splitlines():
-        parts = split_short_line(line.rstrip(), 2)
+        parts = split_short_table_line(line, 2)
         if len(parts) < 2:
             continue
         module_id = _as_int(parts[0])
-        module_name = parts[1].strip()
-        module_args = parts[2].strip() if len(parts) >= 3 else ""
+        module_name = parts[1]
+        module_args = parts[2] if len(parts) >= 3 else ""
         if module_id is not None and module_name:
             modules.append((module_id, module_name, module_args))
     return modules
@@ -427,9 +477,7 @@ def list_sink_inputs() -> list[SinkInputInfo]:
     sink_inputs: list[SinkInputInfo] = []
     current: SinkInputInfo | None = None
 
-    for raw_line in output.splitlines():
-        line = raw_line.rstrip("\n")
-
+    for line in output.splitlines():
         match = SINK_INPUT_HEADER_RE.match(line)
         if match:
             if current is not None:
@@ -479,9 +527,10 @@ def discover_mono_modules() -> tuple[list[int], list[int]]:
     loopback_ids: list[int] = []
 
     for module_id, module_name, module_args in list_modules():
-        if module_name == "module-null-sink" and NULL_SINK_ARG_RE.search(module_args):
+        args = parse_module_args(module_args)
+        if module_name == "module-null-sink" and args.get("sink_name") == MONO_SINK_NAME:
             null_ids.append(module_id)
-        elif module_name == "module-loopback" and LOOPBACK_SOURCE_ARG_RE.search(module_args):
+        elif module_name == "module-loopback" and args.get("source") == MONO_MONITOR_NAME:
             loopback_ids.append(module_id)
 
     return null_ids, loopback_ids
@@ -520,30 +569,55 @@ def runtime_mono_status() -> tuple[bool, bool, list[int], list[int]]:
 # Wait helpers
 # -----------------------------------------------------------------------------
 
-def wait_until(predicate: Callable[[], bool], *, timeout: float, step: float = WAIT_STEP) -> bool:
+
+def wait_until(predicate: Callable[[], bool], *, timeout: float, step: float = WAIT_STEP) -> None:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    last_error: Exception | None = None
+
+    while True:
         try:
             if predicate():
-                return True
-        except Exception:
-            pass
-        time.sleep(step)
-    return False
+                return
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WaitTimeoutError(last_error)
+
+        time.sleep(min(step, remaining))
+
+
+def wait_timeout_detail(exc: WaitTimeoutError) -> str:
+    if exc.last_error is None:
+        return ""
+    detail = str(exc.last_error).strip()
+    return f" ({detail})" if detail else ""
 
 
 def wait_for_sink(sink_name: str) -> None:
-    if not wait_until(lambda: sink_exists(sink_name), timeout=WAIT_TIMEOUT):
-        raise MonoToggleError(f"Timed out waiting for sink: {sink_name}")
+    try:
+        wait_until(lambda: sink_exists(sink_name), timeout=WAIT_TIMEOUT)
+    except WaitTimeoutError as exc:
+        cause = exc.last_error if exc.last_error is not None else exc
+        raise MonoToggleError(
+            f"Timed out waiting for sink: {sink_name}{wait_timeout_detail(exc)}"
+        ) from cause
 
 
 def wait_for_source(source_name: str) -> None:
-    if not wait_until(lambda: source_exists(source_name), timeout=WAIT_TIMEOUT):
-        raise MonoToggleError(f"Timed out waiting for source: {source_name}")
+    try:
+        wait_until(lambda: source_exists(source_name), timeout=WAIT_TIMEOUT)
+    except WaitTimeoutError as exc:
+        cause = exc.last_error if exc.last_error is not None else exc
+        raise MonoToggleError(
+            f"Timed out waiting for source: {source_name}{wait_timeout_detail(exc)}"
+        ) from cause
 
 
 def wait_for_loopback_stream(loopback_module_id: int, target_sink: str) -> None:
-    def _ready() -> bool:
+    def ready() -> bool:
         target_sink_id = get_sink_id(target_sink)
         if target_sink_id is None:
             return False
@@ -553,13 +627,19 @@ def wait_for_loopback_stream(loopback_module_id: int, target_sink: str) -> None:
                 return True
         return False
 
-    if not wait_until(_ready, timeout=WAIT_TIMEOUT):
-        raise MonoToggleError("Timed out waiting for mono loopback stream to appear")
+    try:
+        wait_until(ready, timeout=WAIT_TIMEOUT)
+    except WaitTimeoutError as exc:
+        cause = exc.last_error if exc.last_error is not None else exc
+        raise MonoToggleError(
+            f"Timed out waiting for mono loopback stream to appear{wait_timeout_detail(exc)}"
+        ) from cause
 
 
 # -----------------------------------------------------------------------------
 # Module operations
 # -----------------------------------------------------------------------------
+
 
 def load_module(module_name: str, *module_args: str) -> int:
     output = require_success(
@@ -595,14 +675,19 @@ def cleanup_mono_resources(
         if result.returncode != 0 and not is_no_such_entity_error(result):
             unload_errors.append(f"{module_id}: {command_error(result)}")
 
-    if not wait_until(lambda: not mono_artifacts_present(), timeout=2.0):
-        detail = f" ({'; '.join(unload_errors)})" if unload_errors else ""
-        raise MonoToggleError(f"Timed out waiting for mono resources to disappear after unload{detail}")
+    try:
+        wait_until(lambda: not mono_artifacts_present(), timeout=2.0)
+    except WaitTimeoutError as exc:
+        detail = f" ({'; '.join(unload_errors)})" if unload_errors else wait_timeout_detail(exc)
+        raise MonoToggleError(
+            f"Timed out waiting for mono resources to disappear after unload{detail}"
+        ) from (exc.last_error if exc.last_error is not None else exc)
 
 
 # -----------------------------------------------------------------------------
 # Sink-input movement
 # -----------------------------------------------------------------------------
+
 
 def is_moveable_application_input(
     sink_input: SinkInputInfo,
@@ -703,6 +788,13 @@ def restore_inputs_from_mono(
     if mono_sink_id is None:
         return 0
 
+    available_sinks = {name for _, name in list_sinks()}
+    fallback_available = (
+        fallback_sink is not None
+        and fallback_sink != MONO_SINK_NAME
+        and fallback_sink in available_sinks
+    )
+
     moved = 0
 
     for sink_input in list_sink_inputs():
@@ -714,9 +806,9 @@ def restore_inputs_from_mono(
         preferred_sink = restore_inputs.get(str(sink_input.input_id), "")
         target_sink = ""
 
-        if preferred_sink and preferred_sink != MONO_SINK_NAME and sink_exists(preferred_sink):
+        if preferred_sink and preferred_sink != MONO_SINK_NAME and preferred_sink in available_sinks:
             target_sink = preferred_sink
-        elif fallback_sink and fallback_sink != MONO_SINK_NAME and sink_exists(fallback_sink):
+        elif fallback_available and fallback_sink is not None:
             target_sink = fallback_sink
 
         if not target_sink:
@@ -739,13 +831,14 @@ def restore_inputs_from_mono(
 # Sink selection
 # -----------------------------------------------------------------------------
 
+
 def choose_initial_target_sink() -> str:
     available_sinks = [sink_name for _, sink_name in list_sinks() if sink_name != MONO_SINK_NAME]
     if not available_sinks:
         raise MonoToggleError("No audio output sink is available")
 
     default_sink = get_default_sink()
-    if default_sink and default_sink in set(available_sinks):
+    if default_sink and default_sink in available_sinks:
         return default_sink
 
     return available_sinks[0]
@@ -784,6 +877,7 @@ def choose_restore_sink(state: MonoState | None) -> str | None:
 # Notifications
 # -----------------------------------------------------------------------------
 
+
 def notify(summary: str, body: str, *, urgency: str = "low", timeout_ms: int = NOTIFY_TIMEOUT_MS) -> None:
     if shutil.which("notify-send") is None:
         return
@@ -804,6 +898,7 @@ def notify(summary: str, body: str, *, urgency: str = "low", timeout_ms: int = N
 # -----------------------------------------------------------------------------
 # State detection
 # -----------------------------------------------------------------------------
+
 
 def normalize_stale_state() -> MonoState | None:
     state = load_state()
@@ -850,6 +945,7 @@ def mono_is_active() -> tuple[bool, MonoState | None]:
 # -----------------------------------------------------------------------------
 # Core operations
 # -----------------------------------------------------------------------------
+
 
 def rollback_failed_enable(state: MonoState) -> None:
     restore_sink = choose_restore_sink(state)
@@ -987,6 +1083,7 @@ def status_text() -> str:
 # CLI
 # -----------------------------------------------------------------------------
 
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Toggle system-wide mono output for PipeWire on Arch Linux.",
@@ -1001,11 +1098,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args(sys.argv[1:])
-    ensure_runtime_dir()
-    ensure_dependencies()
-
     try:
+        args = parse_args(sys.argv[1:])
+        ensure_runtime_dir()
+        ensure_dependencies()
+        ensure_audio_server()
+
         with instance_lock():
             match args.action:
                 case "toggle":
@@ -1020,6 +1118,7 @@ def main() -> int:
                     disable_mono()
                 case "status":
                     print(status_text())
+
         return 0
     except MonoToggleError as exc:
         print(f"Error: {exc}", file=sys.stderr)
