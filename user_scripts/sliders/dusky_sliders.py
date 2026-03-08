@@ -8,6 +8,7 @@ Tuned for current Arch Linux + Python 3.14.
 from __future__ import annotations
 
 import functools
+import gc
 import logging
 import math
 import os
@@ -833,6 +834,7 @@ class SliderWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         self.set_visible(False)
+        gc.collect()
         return True
 
     def _on_key_pressed(
@@ -844,6 +846,7 @@ class SliderWindow(Adw.ApplicationWindow):
     ) -> bool:
         if keyval == Gdk.KEY_Escape:
             self.set_visible(False)
+            gc.collect()
             return True
         return False
 
