@@ -229,7 +229,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 145_matugen_directories.sh"
 #    "U | 150_wallpapers_download.sh"
 #    "U | 155_blur_shadow_opacity.sh"
-    "U | 160_theme_ctl.sh set refresh"
+    "U | ignore-fail | 160_theme_ctl.sh set refresh"
 #    "U | 165_qtct_config.sh"
     "U | 170_waypaper_config_reset.sh"
 #    "U | 175_animation_default.sh"
