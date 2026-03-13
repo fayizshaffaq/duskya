@@ -91,6 +91,7 @@ register_items() {
     register_template 3 "Beeper"         "beeper"     "false" "beeper"
     register_template 3 "Spicetify"      "spicetify"  "false" "spicetify"
     register_template 3 "Cava"           "cava"       "true" ""
+    register_template 3 "Dump All Matugen Colors"    "master_dump"   "false" ""
     register_template 3 "Btop"           "btop"       "true" ""
     register_template 3 "Pywalfox"       "pywalfox"   "true" "pywalfox"
 }
@@ -282,8 +283,8 @@ auto_discover_templates() {
         declare -ga "TAB_ITEMS_${disc_tab_idx}=()"
         
         for disc_key in "${discovered[@]}"; do
-            # Discovered items default to off, and bypass the smart checker
-            register_template "$disc_tab_idx" "$disc_key" "$disc_key" "false" ""
+            # Discovered items default to on, and bypass the smart checker
+            register_template "$disc_tab_idx" "$disc_key" "$disc_key" "true" ""
         done
     fi
 }
