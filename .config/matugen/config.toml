@@ -99,18 +99,18 @@ post_hook   = '''
   pkill -SIGUSR1 kitty
 '''
 
-[templates.opencode]
-input_path = '~/.config/matugen/templates/opencode-colors.json'
-output_path = '~/.config/opencode/generated/opencode.json'
+# [templates.opencode]
+# input_path = '~/.config/matugen/templates/opencode-colors.json'
+# output_path = '~/.config/opencode/generated/opencode.json'
 
-[templates.vscode]
-input_path  = '~/.config/matugen/templates/vscode.json'
-output_path = '~/.config/matugen/generated/vscode.json'
-post_hook   = '''
-  if command -v vscodium >/dev/null 2>&1; then
-  ln -nfs "$HOME/.config/matugen/generated/vscode.json" "$HOME/.config/VSCodium/User/settings.json"
-  fi
-'''
+# [templates.vscode]
+# input_path  = '~/.config/matugen/templates/vscode.json'
+# output_path = '~/.config/matugen/generated/vscode.json'
+# post_hook   = '''
+#   if command -v vscodium >/dev/null 2>&1; then
+#   ln -nfs "$HOME/.config/matugen/generated/vscode.json" "$HOME/.config/VSCodium/User/settings.json"
+#   fi
+# '''
 
 # [templates.alacritty]
 # input_path  = '~/.config/matugen/templates/alacritty.toml'
@@ -124,13 +124,13 @@ post_hook   = '''
 pkill -SIGUSR1 nvim
 '''
 
-[templates.zed]
-input_path  = '~/.config/matugen/templates/zed-colors.json'
-output_path = '~/.config/matugen/generated/zed-theme.json'
-post_hook   = '''
-  mkdir -p "$HOME/.config/zed/themes"
-  ln -nfs "$HOME/.config/matugen/generated/zed-theme.json" "$HOME/.config/zed/themes/matugen.json"
-'''
+# [templates.zed]
+# input_path  = '~/.config/matugen/templates/zed-colors.json'
+# output_path = '~/.config/matugen/generated/zed-theme.json'
+# post_hook   = '''
+#   mkdir -p "$HOME/.config/zed/themes"
+#   ln -nfs "$HOME/.config/matugen/generated/zed-theme.json" "$HOME/.config/zed/themes/matugen.json"
+# '''
 
 [templates.yazi]
 input_path  = '~/.config/matugen/templates/yazi-theme.toml'
@@ -187,36 +187,36 @@ post_hook   = '''
   fi
 '''
 
-[templates.vesktop]
-input_path  = '~/.config/matugen/templates/midnight-discord.css'
-output_path = '~/.config/matugen/generated/midnight-discord.css'
-post_hook   = '''
-if command -v vesktop >/dev/null 2>&1; then
-  mkdir -p "$HOME/.config/vesktop/themes/"
-  ln -nfs "$HOME/.config/matugen/generated/midnight-discord.css" "$HOME/.config/vesktop/themes/midnight-discord.css"
-fi
-'''
+# [templates.vesktop]
+# input_path  = '~/.config/matugen/templates/midnight-discord.css'
+# output_path = '~/.config/matugen/generated/midnight-discord.css'
+# post_hook   = '''
+# if command -v vesktop >/dev/null 2>&1; then
+#   mkdir -p "$HOME/.config/vesktop/themes/"
+#   ln -nfs "$HOME/.config/matugen/generated/midnight-discord.css" "$HOME/.config/vesktop/themes/midnight-discord.css"
+# fi
+# '''
 
-[templates.beeper]
-input_path  = '~/.config/matugen/templates/beeper.css'
-output_path = '~/.config/matugen/generated/beeper.css'
-post_hook   = '''
-  if command -v beeper >/dev/null 2>&1; then
-    ln -nfs "$HOME/.config/matugen/generated/beeper.css" "$HOME/.config/BeeperTexts/custom.css"
-    hyprctl dispatch sendshortcut "CTRL SHIFT ALT, R, class:^(BeeperTexts)$"
-  fi
-'''
+# [templates.beeper]
+# input_path  = '~/.config/matugen/templates/beeper.css'
+# output_path = '~/.config/matugen/generated/beeper.css'
+# post_hook   = '''
+#   if command -v beeper >/dev/null 2>&1; then
+#     ln -nfs "$HOME/.config/matugen/generated/beeper.css" "$HOME/.config/BeeperTexts/custom.css"
+#     hyprctl dispatch sendshortcut "CTRL SHIFT ALT, R, class:^(BeeperTexts)$"
+#   fi
+# '''
 
-[templates.spicetify]
-input_path  = '~/.config/matugen/templates/spotify-colors.ini'
-output_path = '~/.config/matugen/generated/spotify-colors.ini'
-post_hook   = '''
-if command -v spicetify >/dev/null 2>&1 && [ -d "$HOME/.config/spicetify/Themes/Comfy" ]; then
-    ln -nfs "$HOME/.config/matugen/generated/spotify-colors.ini" "$HOME/.config/spicetify/Themes/Comfy/color.ini"
-    spicetify apply -n
-    hyprctl dispatch sendshortcut "CTRL SHIFT, R, class:^(spotify)$" || true
-fi
-'''
+# [templates.spicetify]
+# input_path  = '~/.config/matugen/templates/spotify-colors.ini'
+# output_path = '~/.config/matugen/generated/spotify-colors.ini'
+# post_hook   = '''
+# if command -v spicetify >/dev/null 2>&1 && [ -d "$HOME/.config/spicetify/Themes/Comfy" ]; then
+#     ln -nfs "$HOME/.config/matugen/generated/spotify-colors.ini" "$HOME/.config/spicetify/Themes/Comfy/color.ini"
+#     spicetify apply -n
+#     hyprctl dispatch sendshortcut "CTRL SHIFT, R, class:^(spotify)$" || true
+# fi
+# '''
 
 [templates.steam]
 input_path  = '~/.config/matugen/templates/steam.css'
