@@ -15,6 +15,9 @@
 
 # --- USER CONFIGURATION AREA ---
 
+# REMOVE THIS IN TEH FUTRE!!!!!!!!!!!!!!!!!!!!
+rm -rf /tmp/orchestra_1000.lock
+
 # Directories to search for scripts (in order — first match wins)
 SCRIPT_SEARCH_DIRS=(
     "${HOME}/user_scripts/arch_setup_scripts/scripts"
