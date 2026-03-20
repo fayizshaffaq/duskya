@@ -1,22 +1,24 @@
 """
 Utility functions for the Dusky Control Center.
 
-Thread-safe, secure utility library for GTK4 control center on Arch Linux (Hyprland).
-All file I/O is atomic. All public functions are safe to call from any thread.
+Thread-safe utility library for GTK4 control center on Arch Linux (Hyprland).
+Persisted settings use atomic replace semantics. Public helpers are thread-safe,
+except `preflight_check()`, which is intended for startup use on the main thread.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
-import tempfile
 import threading
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, TypeVar, overload
 
 import yaml
@@ -46,8 +48,9 @@ _T = TypeVar("_T")
 # CONSTANTS & PATHS
 # =============================================================================
 LABEL_NA: Final[str] = "N/A"
-_SHELL_METACHARACTERS: Final[frozenset[str]] = frozenset("|&;()<>$`\\\"'*?[]#~=!{}%")
-_TILDE_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?:^|(?<=\s))~(?=/|$|\s)")
+_LEADING_ENV_ASSIGNMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*=.*"
+)
 
 
 def _get_xdg_path(env_var: str, default_suffix: str) -> Path:
@@ -85,23 +88,48 @@ class _ResolvedDirectoryCache:
 
     def get(self) -> Path:
         """Get the resolved directory path, creating it if necessary."""
-        # Fast path: atomic read
         resolved = self._resolved
         if resolved is not None:
             return resolved
 
         with self._lock:
-            # Double-check
             if self._resolved is not None:
                 return self._resolved
             try:
                 self._base_dir.mkdir(parents=True, exist_ok=True)
                 self._resolved = self._base_dir.resolve(strict=True)
             except OSError as e:
-                # Fallback if we can't create/resolve (e.g. permission issues)
                 log.error("Failed to resolve directory %s: %s", self._base_dir, e)
                 return self._base_dir
             return self._resolved
+
+
+class _DirectoryFdCache:
+    """
+    Thread-safe cache for an open directory file descriptor.
+    Callers receive dup()'d descriptors they can safely close.
+    """
+
+    __slots__ = ("_directory_cache", "_fd", "_lock")
+
+    def __init__(self, directory_cache: _ResolvedDirectoryCache) -> None:
+        self._directory_cache: Final[_ResolvedDirectoryCache] = directory_cache
+        self._lock: Final[threading.Lock] = threading.Lock()
+        self._fd: int | None = None
+
+    def dup(self) -> int:
+        """Return a duplicated directory fd for the cached directory."""
+        fd = self._fd
+        if fd is not None:
+            return os.dup(fd)
+
+        with self._lock:
+            if self._fd is None:
+                self._fd = os.open(
+                    self._directory_cache.get(),
+                    os.O_RDONLY | os.O_DIRECTORY,
+                )
+            return os.dup(self._fd)
 
 
 class _ComputeOnceCache:
@@ -115,30 +143,23 @@ class _ComputeOnceCache:
     def __init__(self) -> None:
         self._lock: Final[threading.Lock] = threading.Lock()
         self._cache: dict[str, object] = {}
-        # Map keys to Condition variables for waiting threads
         self._in_flight: dict[str, threading.Condition] = {}
 
     def get_or_compute(self, key: str, compute_fn: Callable[[], _T]) -> _T:
         """Get value from cache, or compute it if missing, handling concurrency."""
         with self._lock:
-            # Loop ensures we handle spurious wakeups AND retries if leader fails
             while key in self._in_flight:
                 cond = self._in_flight[key]
                 cond.wait()
-                # Woke up: check if result is ready
                 if key in self._cache:
-                    return self._cache[key]  # type: ignore
-                # If not in cache and not in flight, loop terminates to let us retry
+                    return self._cache[key]  # type: ignore[return-value]
 
-            # Fast path / Retry success check
             if key in self._cache:
-                return self._cache[key]  # type: ignore
+                return self._cache[key]  # type: ignore[return-value]
 
-            # We are the leader
             cond = threading.Condition(self._lock)
             self._in_flight[key] = cond
 
-        # Compute outside lock
         try:
             value = compute_fn()
         except BaseException:
@@ -156,6 +177,7 @@ class _ComputeOnceCache:
 
 
 _settings_dir_cache: Final = _ResolvedDirectoryCache(SETTINGS_DIR)
+_settings_dir_fd_cache: Final = _DirectoryFdCache(_settings_dir_cache)
 _cache_dir_cache: Final = _ResolvedDirectoryCache(CACHE_DIR)
 _system_info_cache: Final = _ComputeOnceCache()
 
@@ -191,28 +213,35 @@ def load_config(config_path: Path) -> dict[str, object]:
 def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
     """
     Execute a command via UWSM (Universal Wayland Session Manager).
-    Detaches process natively via GLib to prevent zombies and Python GC locks.
+    Returns True only if the launch request was handed off successfully.
     """
-    if not cmd_string or not cmd_string.strip():
-        return False
-
-    expanded_cmd = _expand_command(cmd_string)
-    if not expanded_cmd:
+    normalized_cmd = _normalize_command(cmd_string)
+    if not normalized_cmd:
         return False
 
     safe_title = _sanitize_title(title)
-    full_cmd = _build_command_list(expanded_cmd, safe_title, run_in_terminal)
+    full_cmd = _build_command_list(normalized_cmd, safe_title, run_in_terminal)
 
     if full_cmd is None:
         log.error("Failed to parse command: %r", cmd_string)
         return False
 
-    # Local import is MANDATORY here. utility.py is parsed before gi.require_version 
+    if run_in_terminal:
+        if shutil.which("kitty") is None:
+            log.error("Terminal launcher 'kitty' was not found in PATH")
+            return False
+    elif full_cmd[2:4] != ["sh", "-c"]:
+        executable = full_cmd[2]
+        if shutil.which(executable) is None:
+            log.error("Executable not found: %r", executable)
+            return False
+
+    # Local import is MANDATORY here. utility.py is parsed before gi.require_version
     # is called in the main executable. Importing globally would trigger a fatal GTK crash.
     from gi.repository import GLib
 
     try:
-        # GLib.spawn_async bypasses Python's fork() locks and automatically 
+        # GLib.spawn_async bypasses Python's fork() locks and automatically
         # attaches a child watch to reap the process immediately upon exit.
         # We discard the return value (PID tuple) because success is indicated
         # by the lack of a GLib.Error exception.
@@ -225,7 +254,7 @@ def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
         log.error(
             "Executable failed or not found: %r. Ensure 'uwsm-app' is installed. (GLib Error: %s)",
             full_cmd[0] if full_cmd else "unknown",
-            e.message
+            e.message,
         )
         return False
     except Exception as e:
@@ -233,15 +262,9 @@ def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
         return False
 
 
-def _expand_command(cmd_string: str) -> str:
-    """Expand env vars ($HOME) and tilde (~)."""
-    expanded = os.path.expandvars(cmd_string)
-    
-    def _expand_tilde(match: re.Match[str]) -> str:
-        return str(Path.home())
-
-    expanded = _TILDE_PATTERN.sub(_expand_tilde, expanded)
-    return expanded.strip()
+def _normalize_command(cmd_string: str) -> str:
+    """Trim surrounding whitespace only."""
+    return cmd_string.strip()
 
 
 def _sanitize_title(title: str | None) -> str:
@@ -253,32 +276,94 @@ def _sanitize_title(title: str | None) -> str:
     return " ".join(sanitized.split()) or "Dusky Terminal"
 
 
+def _requires_shell(command: str, parsed_args: list[str]) -> bool:
+    """Return True only when shell semantics are actually required."""
+    if _LEADING_ENV_ASSIGNMENT_PATTERN.fullmatch(parsed_args[0]) is not None:
+        return True
+
+    in_single = False
+    in_double = False
+    escaped = False
+    token_start = True
+
+    for index, ch in enumerate(command):
+        if escaped:
+            escaped = False
+            token_start = False
+            continue
+
+        if in_single:
+            if ch == "'":
+                in_single = False
+            continue
+
+        if in_double:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            elif ch in "$`":
+                return True
+            continue
+
+        if ch.isspace():
+            token_start = True
+            continue
+        if ch == "\\":
+            escaped = True
+            token_start = False
+            continue
+        if ch == "'":
+            in_single = True
+            token_start = False
+            continue
+        if ch == '"':
+            in_double = True
+            token_start = False
+            continue
+        if ch in "|&;()<>`":
+            return True
+        if ch == "$":
+            return True
+        if ch == "~" and token_start:
+            next_ch = command[index + 1] if index + 1 < len(command) else ""
+            if not next_ch or next_ch.isspace() or next_ch == "/":
+                return True
+
+        token_start = False
+
+    return False
+
+
 def _build_command_list(
-    expanded_cmd: str, safe_title: str, run_in_terminal: bool
+    normalized_cmd: str, safe_title: str, run_in_terminal: bool
 ) -> list[str] | None:
-    """Construct the argv list for subprocess."""
+    """Construct the argv list for process spawning."""
     if run_in_terminal:
         return [
-            "uwsm-app", "--",
+            "uwsm-app",
+            "--",
             "kitty",
-            "--class", "dusky-term",
-            "--title", safe_title,
+            "--class",
+            "dusky-term",
+            "--title",
+            safe_title,
             "--hold",
-            "sh", "-c", expanded_cmd,
+            "sh",
+            "-c",
+            normalized_cmd,
         ]
 
-    # Use shell if command contains metacharacters
-    needs_shell = any(c in expanded_cmd for c in _SHELL_METACHARACTERS)
-    if needs_shell:
-        return ["uwsm-app", "--", "sh", "-c", expanded_cmd]
-
     try:
-        parsed_args = shlex.split(expanded_cmd)
+        parsed_args = shlex.split(normalized_cmd, posix=True)
     except ValueError:
-        return ["uwsm-app", "--", "sh", "-c", expanded_cmd]
+        return ["uwsm-app", "--", "sh", "-c", normalized_cmd]
 
     if not parsed_args:
         return None
+
+    if _requires_shell(normalized_cmd, parsed_args):
+        return ["uwsm-app", "--", "sh", "-c", normalized_cmd]
 
     return ["uwsm-app", "--", *parsed_args]
 
@@ -289,12 +374,15 @@ def _build_command_list(
 def preflight_check() -> None:
     """
     Check for critical dependencies (GTK, UWSM).
-    Exits with error message if missing.
+
+    Intended for startup use on the main thread. On failure, this function exits
+    the current thread of execution via SystemExit.
     """
     missing_deps: list[str] = []
 
     try:
         import gi
+
         gi.require_version("Gtk", "4.0")
         gi.require_version("Adw", "1")
     except (ImportError, ValueError):
@@ -312,12 +400,14 @@ def preflight_check() -> None:
         print(msg, file=sys.stderr)
         sys.exit(1)
 
-    # Check write permissions
     try:
-        SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-        test_file = SETTINGS_DIR / ".write_test"
-        test_file.touch()
-        test_file.unlink()
+        settings_fd = _settings_dir_fd_cache.dup()
+        try:
+            test_fd, test_name = _create_temp_file(settings_fd, "write_test")
+            os.close(test_fd)
+            os.unlink(test_name, dir_fd=settings_fd)
+        finally:
+            os.close(settings_fd)
     except OSError as e:
         log.warning("Settings directory %s is not writable: %s", SETTINGS_DIR, e)
 
@@ -398,22 +488,31 @@ def _get_cpu_model() -> str:
 def _get_gpu_model() -> str:
     """Detect GPU using lspci (human-readable or machine format)."""
     try:
-        # Try machine format first
         res = subprocess.run(
             ["lspci", "-mm"],
-            capture_output=True, text=True, timeout=5, check=False
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
         if res.returncode == 0:
             for line in res.stdout.splitlines():
-                if '"VGA compatible controller"' in line or '"3D controller"' in line:
-                    parts = line.split('"')
-                    if len(parts) >= 8:
-                        return f"{parts[5]} {parts[7]}".strip()
-        
-        # Fallback to standard
+                try:
+                    fields = shlex.split(line, posix=True)
+                except ValueError:
+                    continue
+                if len(fields) >= 4 and fields[1] in {
+                    "VGA compatible controller",
+                    "3D controller",
+                }:
+                    return f"{fields[2]} {fields[3]}".strip()
+
         res = subprocess.run(
             ["lspci"],
-            capture_output=True, text=True, timeout=5, check=False
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
         if res.returncode == 0:
             for line in res.stdout.splitlines():
@@ -429,60 +528,98 @@ def _get_gpu_model() -> str:
 # =============================================================================
 # SETTINGS PERSISTENCE (Atomic File I/O)
 # =============================================================================
-def _validate_settings_path(key: str) -> Path | None:
-    """Prevent path traversal attacks."""
+def _validate_settings_key(key: str) -> tuple[str, ...] | None:
+    """Validate a settings key as a relative path beneath the settings directory."""
     if not key or not isinstance(key, str):
         return None
     if "\0" in key:
         return None
-    
-    try:
-        base = _settings_dir_cache.get()
-        # Resolve validates and removes ..
-        target = (base / key).resolve()
-        # Ensure it's strictly inside base
-        target.relative_to(base)
-        return target
-    except (ValueError, OSError):
+
+    pure = PurePosixPath(key)
+    if pure.is_absolute():
         log.warning("Invalid settings path key: %r", key)
         return None
 
+    parts = pure.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        log.warning("Invalid settings path key: %r", key)
+        return None
 
-def save_setting(key: str, value: bool | int | float | str) -> bool:
-    """Atomic write to disk (Temp File -> Fsync -> Rename)."""
-    target = _validate_settings_path(key)
-    if target is None:
-        return False
+    return parts
 
-    # Force all booleans to True/False strings. No more 1/0 conversions.
-    content = str(value)
 
-    temp_fd: int | None = None
-    temp_path: Path | None = None
+def _open_relative_directory(parent_fd: int, name: str, *, create: bool) -> int:
+    """Open a child directory relative to parent_fd without following symlinks."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp_fd, temp_path_str = tempfile.mkstemp(
-            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-        )
-        temp_path = Path(temp_path_str)
+        return os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            os.mkdir(name, 0o777, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        return os.open(name, flags, dir_fd=parent_fd)
+
+
+def _open_settings_parent_dir(
+    parts: tuple[str, ...], *, create: bool
+) -> tuple[int, str]:
+    """Open the parent directory for a setting key and return (dir_fd, filename)."""
+    current_fd = _settings_dir_fd_cache.dup()
+    try:
+        for part in parts[:-1]:
+            next_fd = _open_relative_directory(current_fd, part, create=create)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd, parts[-1]
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _create_temp_file(dir_fd: int, stem: str) -> tuple[int, str]:
+    """Create a unique temporary file in dir_fd without following symlinks."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+
+    for _ in range(32):
+        name = f".{stem}.{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            continue
+        return fd, name
+
+    raise FileExistsError(f"Unable to allocate temporary file for {stem!r}")
+
+
+def save_setting(key: str, value: bool | int | float | str) -> bool:
+    """Atomically save a setting beneath the settings directory."""
+    parts = _validate_settings_key(key)
+    if parts is None:
+        return False
+
+    content = str(value)
+
+    parent_fd: int | None = None
+    temp_fd: int | None = None
+    temp_name: str | None = None
+
+    try:
+        parent_fd, filename = _open_settings_parent_dir(parts, create=True)
+        temp_fd, temp_name = _create_temp_file(parent_fd, filename)
 
         with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-            temp_fd = None  # Transferred to file object
+            temp_fd = None
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
 
-        temp_path.rename(target)
-        temp_path = None  # Prevent deletion of success file
-
-        # Sync parent directory
-        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-        
+        os.replace(temp_name, filename, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temp_name = None
+        os.fsync(parent_fd)
         return True
 
     except OSError as e:
@@ -491,50 +628,89 @@ def save_setting(key: str, value: bool | int | float | str) -> bool:
     finally:
         if temp_fd is not None:
             os.close(temp_fd)
-        if temp_path is not None:
-            # Only unlinks if rename didn't happen
-            temp_path.unlink(missing_ok=True)
+        if temp_name is not None and parent_fd is not None:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 @overload
 def load_setting(key: str, default: bool) -> bool: ...
+
+
 @overload
 def load_setting(key: str, default: int) -> int: ...
+
+
 @overload
 def load_setting(key: str, default: float) -> float: ...
+
+
 @overload
 def load_setting(key: str, default: str) -> str: ...
+
+
 @overload
 def load_setting(key: str, default: None = None) -> str | None: ...
+
 
 def load_setting(
     key: str,
     default: bool | int | float | str | None = None,
 ) -> bool | int | float | str | None:
     """Load setting with automatic type coercion based on default value."""
-    target = _validate_settings_path(key)
-    if target is None:
+    parts = _validate_settings_key(key)
+    if parts is None:
         return default
 
+    parent_fd: int | None = None
+    file_fd: int | None = None
+
     try:
-        raw = target.read_text(encoding="utf-8").strip()
+        parent_fd, filename = _open_settings_parent_dir(parts, create=False)
+        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise OSError("Setting target is not a regular file")
+
+        with os.fdopen(file_fd, "r", encoding="utf-8") as f:
+            file_fd = None
+            raw = f.read()
     except (FileNotFoundError, OSError):
         return default
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
 
     try:
         match default:
-            case bool(): return _parse_bool(raw)
-            case int(): return int(raw)
-            case float(): return float(raw)
-            case _: return raw
+            case bool():
+                return _parse_bool(raw)
+            case int():
+                return int(raw)
+            case float():
+                return float(raw)
+            case _:
+                return raw
     except ValueError:
         return default
 
 
 def _parse_bool(value: str) -> bool:
     """Robust boolean parsing."""
-    lowered = value.lower().strip()
-    return lowered in {"true", "yes", "on", "1"}
+    lowered = value.strip().lower()
+    if lowered in {"true", "yes", "on", "1"}:
+        return True
+    if lowered in {"false", "no", "off", "0"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
 
 
 # =============================================================================
