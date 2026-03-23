@@ -235,16 +235,50 @@ pages:
 
   - type: section
     properties:
-      title: System Recovery
+      title: System Recovery & Backup
       icon: ''
       description: ''
     items:
     - type: navigation
       properties:
-        title: Btrfs Snapshot Rollback
-        description: Revert system or data to previous states
+        title: Btrfs Snapshot Manager
+        description: Create and restore system and data states
         icon: document-revert-symbolic
       layout:
+        - type: section
+          properties:
+            title: Create Snapshots
+            description: Type a description and hit Create.
+          items:
+            - type: entry
+              properties:
+                title: "Create Combined Snapshot"
+                description: "Takes a synced snapshot of both Root and Home."
+                icon: camera-photo-symbolic
+                button_text: "Create"
+              on_action:
+                type: exec
+                # Executes both sequentially. The Python script will inject the quoted description into {value}.
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -C {value} && sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -C {value}"
+            - type: entry
+              properties:
+                title: "Create Root Snapshot"
+                description: "Takes a snapshot of the root filesystem only."
+                icon: drive-harddisk-system-symbolic
+                button_text: "Create"
+              on_action:
+                type: exec
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -C {value}"
+            - type: entry
+              properties:
+                title: "Create Home Snapshot"
+                description: "Takes a snapshot of your personal data only."
+                icon: user-home-symbolic
+                button_text: "Create"
+              on_action:
+                type: exec
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -C {value}"
+
         - type: section
           properties:
             title: Full System Recovery
@@ -255,15 +289,15 @@ pages:
                 title: "Combined Recovery (Root + Home)"
                 description: "Select an exact timestamp. Requires immediate reboot."
                 icon: system-reboot-symbolic
-                list_command: "pkexec ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
                 display_template: "[{date}] {description}"
                 button_text: "Restore Both"
                 style: "destructive"
                 sort: "reverse"
               on_action:
                 type: "exec"
-                command: "pkexec ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh '{date}'"
-
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh '{date}'"
+                
         - type: section
           properties:
             title: Advanced Recovery (Partial)
@@ -274,27 +308,27 @@ pages:
                 title: "System Recovery (Root Only)"
                 description: "Revert pacman updates or system configs. Requires reboot."
                 icon: drive-harddisk-system-symbolic
-                list_command: "pkexec ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
                 display_template: "[{id}] {date} | {description}"
                 button_text: "Restore Root"
                 style: "destructive"
                 sort: "reverse"
               on_action:
                 type: "exec"
-                command: "pkexec ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -R {id}"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -R {id}"
             - type: async_selector
               properties:
                 title: "Data Recovery (Home Only)"
                 description: "Revert personal files. Hot-reloads instantly (no reboot)."
                 icon: user-home-symbolic
-                list_command: "pkexec ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -l --json"
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -l --json"
                 display_template: "[{id}] {date} | {description}"
                 button_text: "Restore Home"
                 style: "suggested"
                 sort: "reverse"
               on_action:
                 type: "exec"
-                command: "pkexec ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -R {id}"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -R {id}"
 
   - type: section
     properties:
