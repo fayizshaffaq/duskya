@@ -298,8 +298,8 @@ pages:
                 display_max_length: 45
               on_action:
                 type: "exec"
-                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh '{date}'"
-                
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh '{raw_date}'"
+
         - type: section
           properties:
             title: Advanced Recovery (Partial)

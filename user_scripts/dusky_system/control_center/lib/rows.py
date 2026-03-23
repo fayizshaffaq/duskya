@@ -1871,9 +1871,9 @@ class AsyncSelectorRow(BaseActionRow):
         self.display_template = str(properties.get("display_template", "{id}"))
         self.sort_order = str(properties.get("sort", "none")).lower()
 
-        # New Properties for Auto-Refresh and UI Control
         self.auto_refresh = bool(properties.get("auto_refresh", False))
-        self.display_max_length = _safe_int(properties.get("display_max_length"), 45)
+        # Default to 30 characters width limit to prevent UI squishing
+        self.display_max_length = _safe_int(properties.get("display_max_length"), 30)
 
         button_text = str(properties.get("button_text", "Execute"))
         button_style = str(properties.get("style", "default")).lower()
@@ -1881,7 +1881,6 @@ class AsyncSelectorRow(BaseActionRow):
         self.json_data: list[dict] = []
         self._fetch_in_progress = False
 
-        # UI Construction
         self.controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.controls_box.set_valign(Gtk.Align.CENTER)
 
@@ -1890,7 +1889,6 @@ class AsyncSelectorRow(BaseActionRow):
         self.refresh_btn.connect("clicked", self._on_refresh_clicked)
         self.refresh_btn.add_css_class("flat")
 
-        # Hide refresh button if auto-refresh is active
         if self.auto_refresh:
             self.refresh_btn.set_visible(False)
 
@@ -1900,11 +1898,16 @@ class AsyncSelectorRow(BaseActionRow):
         self.dropdown.set_halign(Gtk.Align.END)
         self.dropdown.set_hexpand(False)
 
+        # UI FIX: Implement a strict factory to prevent width starvation
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._on_dropdown_setup)
+        factory.connect("bind", self._on_dropdown_bind)
+        self.dropdown.set_factory(factory)
+
         self.action_btn = Gtk.Button(label=button_text)
         self.action_btn.connect("clicked", self._on_action_clicked)
         self.action_btn.set_sensitive(False)
 
-        # Apply standard style mapping
         if button_style == "destructive":
             self.action_btn.add_css_class("destructive-action")
         elif button_style == "suggested":
@@ -1917,9 +1920,21 @@ class AsyncSelectorRow(BaseActionRow):
         self.controls_box.append(self.action_btn)
 
         self.add_suffix(self.controls_box)
-
-        # Hook map signal to trigger auto-refresh the moment the widget appears
         self.connect("map", self._on_map)
+
+    def _on_dropdown_setup(self, factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
+        """Configures the UI limits for each dropdown item."""
+        label = Gtk.Label(xalign=0)
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_max_width_chars(self.display_max_length)
+        list_item.set_child(label)
+
+    def _on_dropdown_bind(self, factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
+        """Binds the string data to the UI label."""
+        label = list_item.get_child()
+        string_obj = list_item.get_item()
+        if label and string_obj:
+            label.set_text(string_obj.get_string())
 
     def _on_map(self, _widget: Gtk.Widget) -> None:
         """Triggered when the widget is drawn on screen."""
