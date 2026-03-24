@@ -204,10 +204,15 @@ def ensure_no_nested_subvolumes(plan: PreparedRestore) -> None:
             f"{error_text(result)}"
         )
 
-    if result.stdout.strip():
+    nested_output = result.stdout.strip()
+    if nested_output:
         fail(
-            f"\n[!] CRITICAL HALT: Nested subvolumes detected inside "
-            f"'{plan.spec.active_subvol}' for config '{plan.spec.config}'!"
+            f"\n[!] CRITICAL HALT: Nested subvolumes detected physically inside "
+            f"'{plan.spec.active_subvol}' for config '{plan.spec.config}'!\n\n"
+            f"Offending subvolumes:\n{nested_output}\n\n"
+            f"[!] An atomic rollback would trap these inside the backup subvolume.\n"
+            f"[!] Please check what these are. You may need to flatten your Btrfs topology "
+            f"(e.g., move Docker to a separate top-level subvolume)."
         )
 
 
