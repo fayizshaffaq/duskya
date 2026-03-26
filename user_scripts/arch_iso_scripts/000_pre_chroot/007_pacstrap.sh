@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# MODULE: PACSTRAP (VERIFIED HARDWARE & FIXED REGEX)
+# MODULE: PACSTRAP (HARDWARE-VERIFIED & UNIFIED CACHE EDITION)
 # AUTHOR: Elite DevOps Setup
 # -----------------------------------------------------------------------------
 set -euo pipefail
@@ -19,13 +19,15 @@ fi
 # --- Configuration ---
 readonly MOUNT_POINT="/mnt"
 USE_GENERIC_FIRMWARE=0
-LSPCI_CACHE=""
+HW_CACHE=""
+VM_DETECTED=0
 
-# Base packages every system needs
+# Base packages every system needs.
+# Added 'linux-firmware-other' to catch minor USB/controllers missed by split packages.
 FINAL_PACKAGES=(
     base base-devel linux linux-headers
     neovim btrfs-progs dosfstools git
-    networkmanager yazi
+    networkmanager yazi linux-firmware-other
 )
 
 # --- Logging Helpers ---
@@ -38,12 +40,31 @@ package_exists() {
     pacman -Si "$1" &>/dev/null
 }
 
-# --- Helper: Cached lspci output ---
-get_lspci_cache() {
-    if [[ -z "$LSPCI_CACHE" ]]; then
-        LSPCI_CACHE=$(lspci -mm 2>/dev/null) || LSPCI_CACHE=""
+# --- Helper: Unified Hardware Cache (PCI + USB) ---
+get_hw_cache() {
+    if [[ -z "$HW_CACHE" ]]; then
+        local pci_data=""
+        local usb_data=""
+
+        # Bootstrapping dependencies silently
+        if ! command -v lspci &>/dev/null; then
+            pacman -S --noconfirm --needed pciutils &>/dev/null
+        fi
+        if ! command -v lsusb &>/dev/null; then
+            pacman -S --noconfirm --needed usbutils &>/dev/null
+        fi
+
+        pci_data=$(lspci -mm 2>/dev/null) || pci_data=""
+        usb_data=$(lsusb 2>/dev/null) || usb_data=""
+        
+        HW_CACHE=$(printf '%s\n%s' "$pci_data" "$usb_data")
+
+        # Virtualization Guard (VirtIO, VMware, VirtualBox)
+        if echo "$HW_CACHE" | grep -iEq "1af4|15ad|80ee|VirtualBox|VMware|VirtIO"; then
+            VM_DETECTED=1
+        fi
     fi
-    printf '%s\n' "$LSPCI_CACHE"
+    printf '%s\n' "$HW_CACHE"
 }
 
 # --- Helper: Detect Hardware & Add Package ---
@@ -52,13 +73,22 @@ detect_and_add() {
     local pattern="$2"
     local pkg="$3"
 
-    # Skip if already fell back to generic
-    ((USE_GENERIC_FIRMWARE)) && return 0
-
     echo -ne "   > Scanning for ${name}... "
 
-    if get_lspci_cache | grep -iEq "$pattern"; then
+    # Short-circuit if a Virtual Machine is detected
+    if ((VM_DETECTED)); then
+        echo -e "${C_YELLOW}SKIPPED (VM Environment)${C_RESET}"
+        return 0
+    fi
+
+    if get_hw_cache | grep -iEq "$pattern"; then
         echo -e "${C_GREEN}FOUND${C_RESET}"
+
+        # If fallback is already active, acknowledge hardware but don't queue
+        if ((USE_GENERIC_FIRMWARE)); then
+             echo -e "     -> ${C_YELLOW}Generic mode active; bypassing specific package request.${C_RESET}"
+             return 0
+        fi
 
         if package_exists "$pkg"; then
             echo -e "     -> Queuing Verified Package: ${C_BOLD}${pkg}${C_RESET}"
@@ -78,19 +108,16 @@ detect_and_add() {
 # ==============================================================================
 echo -e "${C_BOLD}=== PACSTRAP: HARDWARE-VERIFIED EDITION ===${C_RESET}"
 
-# Check Root
 if ((EUID != 0)); then
     log_err "This script must be run as root."
     exit 1
 fi
 
-# Check Mount
 if ! mountpoint -q "$MOUNT_POINT"; then
     log_err "$MOUNT_POINT is not a mountpoint. Mount your partitions first."
     exit 1
 fi
 
-# Check Network (WITH TIMEOUT - fixes the hang!)
 echo -ne "[....] Checking network connectivity..."
 if ! ping -c 1 -W 3 archlinux.org &>/dev/null; then
     echo -e "\r[${C_RED}FAIL${C_RESET}] Checking network connectivity"
@@ -99,70 +126,80 @@ if ! ping -c 1 -W 3 archlinux.org &>/dev/null; then
 fi
 echo -e "\r[${C_GREEN} OK ${C_RESET}] Checking network connectivity"
 
-# Sync DB (Crucial for package_exists check)
+# Wait for pacman lock (Resolves Live ISO Reflector race condition)
+while [[ -f /var/lib/pacman/db.lck ]]; do
+    log_warn "Waiting for pacman lock (reflector.service running?)..."
+    sleep 3
+done
+
 log_info "Syncing package databases..."
 pacman -Sy --noconfirm &>/dev/null
 
 # ==============================================================================
 # 2. CPU MICROCODE
 # ==============================================================================
-CPU_VENDOR=$(awk -F': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo)
+# Robust awk parsing that ignores tabs/spacing quirks
+CPU_VENDOR=$(awk '/^vendor_id/ {print $3; exit}' /proc/cpuinfo)
 
 case "$CPU_VENDOR" in
     GenuineIntel)
         log_info "CPU: Intel Detected"
         FINAL_PACKAGES+=("intel-ucode")
-        detect_and_add "Intel Chipset/WiFi" "intel" "linux-firmware-intel"
         ;;
     AuthenticAMD)
         log_info "CPU: AMD Detected"
         FINAL_PACKAGES+=("amd-ucode")
         ;;
     *)
-        log_warn "Unknown CPU Vendor ($CPU_VENDOR). VM Environment?"
+        log_warn "Unknown CPU Vendor ($CPU_VENDOR). Proceeding without specific ucode."
         ;;
 esac
 
 # ==============================================================================
-# 3. PERIPHERAL DETECTION
+# 3. PERIPHERAL DETECTION (PCI & USB)
 # ==============================================================================
-log_info "Scanning PCI Bus..."
+log_info "Scanning Hardware Topography (PCI + USB)..."
 
-# Ensure lspci is available
-if ! command -v lspci &>/dev/null; then
-    log_warn "'lspci' not found. Installing pciutils temporarily..."
-    pacman -S --noconfirm pciutils &>/dev/null
+# Prime the cache and check for VMs
+get_hw_cache >/dev/null
+
+if ((VM_DETECTED)); then
+    log_warn "Virtual Machine detected. Bypassing bare-metal firmware discovery."
 fi
 
-# Prime the cache
-get_lspci_cache >/dev/null
-
 # -- GRAPHICS --
-detect_and_add "Nvidia GPU"        "nvidia"                 "linux-firmware-nvidia"
-detect_and_add "AMD GPU (Modern)"  "amdgpu|navi|rdna"       "linux-firmware-amdgpu"
+detect_and_add "Nvidia GPU"        "10de|nvidia"            "linux-firmware-nvidia"
+detect_and_add "AMD GPU (Modern)"  "1002|amdgpu|navi|rdna"  "linux-firmware-amdgpu"
 detect_and_add "AMD GPU (Legacy)"  "\b(radeon|ati)\b"       "linux-firmware-radeon"
 
-# -- NETWORKING --
+# -- NETWORKING & BLUETOOTH --
+detect_and_add "Intel Network/BT"  "intel.*(network|wireless|bluetooth)|8086" "linux-firmware-intel"
 detect_and_add "Mediatek WiFi/BT"  "mediatek"               "linux-firmware-mediatek"
-detect_and_add "Broadcom WiFi"     "broadcom"               "linux-firmware-broadcom"
-detect_and_add "Atheros WiFi"      "atheros"                "linux-firmware-atheros"
+detect_and_add "Broadcom WiFi/BT"  "broadcom"               "linux-firmware-broadcom"
+detect_and_add "Atheros WiFi/BT"   "atheros"                "linux-firmware-atheros"
 detect_and_add "Realtek Eth/WiFi"  "realtek|\brtl"          "linux-firmware-realtek"
+
+# -- AUDIO --
+detect_and_add "Intel SOF Audio"   "audio.*intel|8086"      "sof-firmware"
+detect_and_add "Cirrus Logic Audio""cirrus"                 "linux-firmware-cirrus"
 
 # ==============================================================================
 # 4. FINAL PACKAGE ASSEMBLY
 # ==============================================================================
 if ((USE_GENERIC_FIRMWARE)); then
-    log_warn "Fallback Triggered: Installing generic linux-firmware."
+    log_warn "Fallback Triggered: Consolidating to generic linux-firmware."
 
-    # Filter out specific firmware packages
+    # Filter out specific firmware packages if they sneaked in before fallback triggered
     CLEAN_LIST=()
     for pkg in "${FINAL_PACKAGES[@]}"; do
-        [[ "$pkg" == linux-firmware-* ]] || CLEAN_LIST+=("$pkg")
+        [[ "$pkg" == linux-firmware-* || "$pkg" == "sof-firmware" ]] || CLEAN_LIST+=("$pkg")
     done
     FINAL_PACKAGES=("${CLEAN_LIST[@]}" "linux-firmware")
 else
-    # Add the license file required by split packages
-    FINAL_PACKAGES+=("linux-firmware-whence")
+    # Add the license file required by split packages (only if not running generic)
+    if ! ((VM_DETECTED)); then
+        FINAL_PACKAGES+=("linux-firmware-whence")
+    fi
 fi
 
 # ==============================================================================
