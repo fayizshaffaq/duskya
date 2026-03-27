@@ -24,8 +24,10 @@ VM_DETECTED=0
 CONNECTIVITY_HOST=""
 
 # Base packages every system needs.
+# mkinitcpio is explicit to avoid the initramfs provider prompt and
+# to match what this install actually used successfully.
 FINAL_PACKAGES=(
-    base base-devel linux linux-headers
+    base base-devel linux linux-headers mkinitcpio
     neovim btrfs-progs dosfstools git
     networkmanager yazi linux-firmware-other
 )
@@ -172,6 +174,12 @@ dedupe_final_packages() {
     FINAL_PACKAGES=("${deduped[@]}")
 }
 
+# --- Helper: Normalize target temp dir permissions ---
+normalize_target_tmp_permissions() {
+    mkdir -p "$MOUNT_POINT/var/tmp"
+    chmod 1777 "$MOUNT_POINT/var/tmp"
+}
+
 # --- Parse Arguments ---
 for arg in "$@"; do
     case "$arg" in
@@ -312,8 +320,17 @@ else
     fi
 fi
 
+log_info "Normalizing target temporary directory permissions..."
+normalize_target_tmp_permissions
+
 echo "Installing..."
 wait_for_pacman_lock
-pacstrap -K "$MOUNT_POINT" "${FINAL_PACKAGES[@]}" --needed
+
+if (( AUTO_MODE )); then
+    # Feed default answers to pacstrap/pacman prompts without tripping pipefail.
+    pacstrap -K "$MOUNT_POINT" "${FINAL_PACKAGES[@]}" --needed < <(yes "")
+else
+    pacstrap -K "$MOUNT_POINT" "${FINAL_PACKAGES[@]}" --needed
+fi
 
 echo -e "\n${C_GREEN}Pacstrap Complete.${C_RESET}"
