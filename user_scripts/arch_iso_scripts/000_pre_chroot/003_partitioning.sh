@@ -22,7 +22,6 @@ OPENED_CRYPTROOT=0
 cleanup() {
     local status=${1:-0}
 
-    # Prevent recursive trap firing
     trap - EXIT INT TERM
 
     # If this run opened cryptroot but failed later, close it.
@@ -75,11 +74,72 @@ wait_for_block_device() {
     return 1
 }
 
+# --- Helper: Normalize findmnt Source ---
+normalize_mount_source() {
+    local src="${1:-}"
+    printf '%s\n' "${src%%[*}"
+}
+
+# --- Helper: Get dm-crypt mapper name from node ---
+get_dm_name() {
+    local node="$1"
+    local resolved
+
+    resolved=$(readlink -f "$node")
+
+    if [[ "$node" == /dev/mapper/* ]]; then
+        printf '%s\n' "${node##*/}"
+        return 0
+    fi
+
+    if [[ "$resolved" == /dev/dm-* && -r "/sys/class/block/${resolved##*/}/dm/name" ]]; then
+        cat "/sys/class/block/${resolved##*/}/dm/name"
+        return 0
+    fi
+
+    return 1
+}
+
+# --- Helper: Get immediate backing device ---
+get_immediate_backing_device() {
+    local node="$1"
+    local parent=""
+    local dm_name=""
+    local backing=""
+    local slave=""
+
+    node=$(readlink -f "$node")
+
+    parent=$(lsblk -ndo PKNAME "$node" 2>/dev/null | head -n1 || true)
+    if [[ -n "$parent" ]]; then
+        printf '/dev/%s\n' "$parent"
+        return 0
+    fi
+
+    if dm_name=$(get_dm_name "$node" 2>/dev/null); then
+        backing=$(cryptsetup status "$dm_name" 2>/dev/null | awk -F': *' '$1 ~ /^[[:space:]]*device$/ {print $2; exit}' || true)
+        if [[ -n "$backing" && -b "$backing" ]]; then
+            readlink -f "$backing"
+            return 0
+        fi
+    fi
+
+    if [[ -d "/sys/class/block/${node##*/}/slaves" ]]; then
+        slave=$(find "/sys/class/block/${node##*/}/slaves" -mindepth 1 -maxdepth 1 -printf '/dev/%f\n' -quit 2>/dev/null || true)
+        if [[ -n "$slave" && -b "$slave" ]]; then
+            readlink -f "$slave"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 # --- Helper: Is Node Backed by Target Disk? ---
 device_is_on_disk() {
     local node
     local disk
-    local parent
+    local next
 
     node=$(readlink -f "$1")
     disk=$(readlink -f "$2")
@@ -89,11 +149,80 @@ device_is_on_disk() {
     while true; do
         [[ "$node" == "$disk" ]] && return 0
 
-        parent=$(lsblk -ndo PKNAME "$node" 2>/dev/null | head -n1 || true)
-        [[ -n "$parent" ]] || return 1
+        next=$(get_immediate_backing_device "$node" 2>/dev/null || true)
+        [[ -n "$next" && -b "$next" ]] || return 1
 
-        node="/dev/${parent}"
+        node="$next"
     done
+}
+
+# --- Helper: Resolve Swap Backing Device ---
+get_swap_backing_device() {
+    local swap_name="$1"
+    local swap_src=""
+
+    if [[ -b "$swap_name" ]]; then
+        readlink -f "$swap_name"
+        return 0
+    fi
+
+    swap_src=$(findmnt -rn -T "$swap_name" -o SOURCE 2>/dev/null | head -n1 || true)
+    swap_src=$(normalize_mount_source "$swap_src")
+
+    if [[ -n "$swap_src" && -e "$swap_src" ]]; then
+        readlink -f "$swap_src" 2>/dev/null || printf '%s\n' "$swap_src"
+    fi
+}
+
+# --- Helper: Does Device Tree Still Have Active Swap? ---
+has_active_swap_on_device() {
+    local dev="$1"
+    local swap_name
+    local swap_src
+
+    while IFS= read -r swap_name; do
+        [[ -n "$swap_name" ]] || continue
+        swap_src=$(get_swap_backing_device "$swap_name")
+
+        if [[ -n "$swap_src" && -b "$swap_src" ]] && device_is_on_disk "$swap_src" "$dev"; then
+            return 0
+        fi
+    done < <(swapon --show=NAME --noheadings 2>/dev/null || true)
+
+    return 1
+}
+
+# --- Helper: Does Device Tree Still Have Active Mounts? ---
+has_active_mounts_on_device() {
+    local dev="$1"
+    local src
+    local mp
+    local norm_src
+
+    while read -r src mp; do
+        [[ -n "$src" && -n "$mp" ]] || continue
+        norm_src=$(normalize_mount_source "$src")
+
+        if [[ -b "$norm_src" ]] && device_is_on_disk "$norm_src" "$dev"; then
+            return 0
+        fi
+    done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null || true)
+
+    return 1
+}
+
+# --- Helper: Does Device Tree Still Have Active Crypt Mappings? ---
+has_active_crypt_on_device() {
+    local dev="$1"
+    local node
+    local type
+
+    while read -r node type; do
+        [[ -n "$node" && -n "$type" ]] || continue
+        [[ "$type" == "crypt" ]] && return 0
+    done < <(lsblk -pnro NAME,TYPE "$dev" 2>/dev/null || true)
+
+    return 1
 }
 
 # --- Helper: Validate Target Disk ---
@@ -165,6 +294,11 @@ ensure_mapper_name_available() {
             echo -e "${C_YELLOW}>> Releasing existing ${TARGET_CRYPT_NAME} mapper on $target_dev...${C_RESET}"
             cryptsetup close "${TARGET_CRYPT_NAME}" 2>/dev/null || true
             udevadm settle
+
+            if [[ -b "/dev/mapper/${TARGET_CRYPT_NAME}" ]]; then
+                echo -e "${C_RED}Critical: Failed to release existing ${TARGET_CRYPT_NAME} mapper on $target_dev. Aborting.${C_RESET}"
+                exit 1
+            fi
         else
             echo -e "${C_RED}Critical: /dev/mapper/${TARGET_CRYPT_NAME} already exists and does not belong to $target_dev. Aborting to avoid collateral damage.${C_RESET}"
             exit 1
@@ -177,9 +311,10 @@ teardown_device() {
     local dev="$1"
     local swap_name
     local swap_src
-    local node
     local src
     local mp
+    local node
+    local type
     local i
 
     local -A mount_targets=()
@@ -189,11 +324,7 @@ teardown_device() {
     while IFS= read -r swap_name; do
         [[ -n "$swap_name" ]] || continue
 
-        if [[ -b "$swap_name" ]]; then
-            swap_src="$swap_name"
-        else
-            swap_src=$(findmnt -rn -o SOURCE --target "$swap_name" 2>/dev/null | head -n1 || true)
-        fi
+        swap_src=$(get_swap_backing_device "$swap_name")
 
         if [[ -n "$swap_src" && -b "$swap_src" ]] && device_is_on_disk "$swap_src" "$dev"; then
             echo -e "${C_YELLOW}>> Disabling active swap on $dev...${C_RESET}"
@@ -201,32 +332,40 @@ teardown_device() {
         fi
     done < <(swapon --show=NAME --noheadings 2>/dev/null || true)
 
-    # 2. Unmount all mountpoints backed by this device tree
-    while IFS= read -r node; do
-        [[ -b "$node" ]] || continue
+    if has_active_swap_on_device "$dev"; then
+        echo -e "${C_RED}Critical: Failed to disable all active swap on $dev. Aborting.${C_RESET}"
+        exit 1
+    fi
 
-        for src in "$node" "$(readlink -f "$node")"; do
-            [[ -n "$src" ]] || continue
-            while IFS= read -r mp; do
-                [[ -n "$mp" ]] || continue
-                mount_targets["$mp"]=1
-            done < <(findmnt -rn -S "$src" -o TARGET 2>/dev/null || true)
-        done
-    done < <(lsblk -pnro NAME "$dev" 2>/dev/null || true)
+    # 2. Unmount all mountpoints backed by this device tree
+    while read -r src mp; do
+        [[ -n "$src" && -n "$mp" ]] || continue
+        src=$(normalize_mount_source "$src")
+
+        if [[ -b "$src" ]] && device_is_on_disk "$src" "$dev"; then
+            mount_targets["$mp"]=1
+        fi
+    done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null || true)
 
     if (( ${#mount_targets[@]} > 0 )); then
         echo -e "${C_YELLOW}>> Unmounting active filesystems on $dev...${C_RESET}"
         while IFS= read -r mp; do
             [[ -n "$mp" ]] || continue
-            umount -R "$mp" 2>/dev/null || true
+            umount "$mp" 2>/dev/null || umount -R "$mp" 2>/dev/null || true
         done < <(printf '%s\n' "${!mount_targets[@]}" | awk '{print length "\t" $0}' | sort -rn | cut -f2-)
     fi
 
+    if has_active_mounts_on_device "$dev"; then
+        echo -e "${C_RED}Critical: Failed to unmount all active filesystems on $dev. Aborting.${C_RESET}"
+        exit 1
+    fi
+
     # 3. Close active crypt mappers backed by this device tree
-    while IFS= read -r node; do
-        [[ -n "$node" ]] || continue
+    while read -r node type; do
+        [[ -n "$node" && -n "$type" ]] || continue
+        [[ "$type" == "crypt" ]] || continue
         crypts+=("$node")
-    done < <(lsblk -pnro NAME,TYPE "$dev" 2>/dev/null | awk '$2=="crypt"{print $1}')
+    done < <(lsblk -pnro NAME,TYPE "$dev" 2>/dev/null || true)
 
     if (( ${#crypts[@]} > 0 )); then
         echo -e "${C_YELLOW}>> Closing active LUKS containers on $dev...${C_RESET}"
@@ -236,6 +375,11 @@ teardown_device() {
     fi
 
     udevadm settle
+
+    if has_active_crypt_on_device "$dev"; then
+        echo -e "${C_RED}Critical: Failed to close all active LUKS containers on $dev. Aborting.${C_RESET}"
+        exit 1
+    fi
 }
 
 # --- Helper: Disk List ---
