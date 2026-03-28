@@ -82,8 +82,6 @@ sudo_path_mtime() {
     sudo stat -c %Y -- "$1" 2>/dev/null || return 1
 }
 
-# FAT/VFAT timestamps are coarse; allow small slack so we don't spuriously
-# rebuild forever when the ESP stores mtimes at lower resolution.
 sudo_path_not_older_than() {
     local lhs="$1" rhs="$2" lhs_m rhs_m slop=2
     sudo_path_is_file "$lhs" || return 1
@@ -247,6 +245,31 @@ set_shell_var() {
     else
         printf '%s="%s"\n' "$key" "$value" | sudo tee -a "$file" >/dev/null
     fi
+}
+
+collect_limine_config_targets() {
+    local -a files=("/etc/default/limine")
+    [[ -f /etc/limine-entry-tool.conf ]] && files+=("/etc/limine-entry-tool.conf")
+    printf '%s\n' "${files[@]}"
+}
+
+read_shell_var_from_file() {
+    local file="$1" key="$2"
+    sudo awk -v key="$key" '
+        $0 ~ "^[[:space:]]*" key "=" {
+            line=$0
+            sub(/^[[:space:]]*[^=]+=/, "", line)
+            gsub(/^[[:space:]]*"/, "", line)
+            gsub(/"[[:space:]]*$/, "", line)
+            print line
+            exit
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+shell_var_key_present() {
+    local file="$1" key="$2"
+    sudo grep -qE "^[[:space:]]*${key}=" "$file" 2>/dev/null
 }
 
 dep_satisfied() {
@@ -457,7 +480,8 @@ prepare_limine_nvram_for_install() {
 }
 
 limine_state_appears_current() {
-    local esp_target loader_path
+    local esp_target loader_path cfg
+    local -a config_files=()
 
     esp_target="$(detect_esp_mountpoint 2>/dev/null || true)"
     [[ -n "$esp_target" ]] || return 1
@@ -470,9 +494,11 @@ limine_state_appears_current() {
         sudo_path_not_older_than /boot/limine.conf /etc/kernel/cmdline || return 1
     fi
 
-    if sudo_path_is_file /etc/default/limine; then
-        sudo_path_not_older_than /boot/limine.conf /etc/default/limine || return 1
-    fi
+    mapfile -t config_files < <(collect_limine_config_targets)
+    for cfg in "${config_files[@]}"; do
+        sudo_path_is_file "$cfg" || continue
+        sudo_path_not_older_than /boot/limine.conf "$cfg" || return 1
+    done
 
     return 0
 }
@@ -595,7 +621,10 @@ configure_cmdline() {
 }
 
 configure_limine_defaults() {
-    local limine_defaults="/etc/default/limine" esp_target current_esp
+    local limine_defaults="/etc/default/limine"
+    local esp_target desired_boot_order file file_esp
+    local esp_needs_update=false boot_order_needs_update=false
+    local -a config_files=()
 
     if [[ -f /etc/limine-entry-tool.conf && ! -f "$limine_defaults" ]]; then
         sudo install -m 0644 /etc/limine-entry-tool.conf "$limine_defaults"
@@ -603,19 +632,39 @@ configure_limine_defaults() {
         sudo touch "$limine_defaults"
     fi
 
+    mapfile -t config_files < <(collect_limine_config_targets)
     esp_target="$(detect_esp_mountpoint)" || fatal "Could not detect a mounted ESP."
-    current_esp="$(sudo grep -E '^[[:space:]]*ESP_PATH=' "$limine_defaults" 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
 
-    if [[ "$current_esp" != "$esp_target" ]]; then
-        backup_file "$limine_defaults"
-        set_shell_var "$limine_defaults" ESP_PATH "$esp_target"
+    for file in "${config_files[@]}"; do
+        file_esp="$(read_shell_var_from_file "$file" ESP_PATH)"
+        if [[ "$file_esp" != "$esp_target" ]]; then
+            esp_needs_update=true
+            break
+        fi
+    done
+
+    if [[ "$esp_needs_update" == true ]]; then
+        for file in "${config_files[@]}"; do
+            backup_file "$file"
+            set_shell_var "$file" ESP_PATH "$esp_target"
+        done
         info "Configured ESP_PATH=${esp_target}"
         NEEDS_LIMINE_UPDATE=true
     fi
 
-    if ! sudo grep -qE '^[[:space:]]*BOOT_ORDER=' "$limine_defaults" 2>/dev/null; then
-        backup_file "$limine_defaults"
-        set_shell_var "$limine_defaults" BOOT_ORDER "*, *lts, *fallback, Snapshots"
+    desired_boot_order="*, *lts, *fallback, Snapshots"
+    for file in "${config_files[@]}"; do
+        if ! shell_var_key_present "$file" BOOT_ORDER; then
+            boot_order_needs_update=true
+            break
+        fi
+    done
+
+    if [[ "$boot_order_needs_update" == true ]]; then
+        for file in "${config_files[@]}"; do
+            backup_file "$file"
+            set_shell_var "$file" BOOT_ORDER "$desired_boot_order"
+        done
         info "Configured BOOT_ORDER to prioritize kernels over Snapshots."
         NEEDS_LIMINE_UPDATE=true
     fi
