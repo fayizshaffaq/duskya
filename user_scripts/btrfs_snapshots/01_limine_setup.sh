@@ -644,13 +644,19 @@ configure_limine_defaults() {
     ensure_limine_defaults_file
 
     esp_target="$(detect_esp_mountpoint)" || fatal "Could not detect a mounted ESP."
-    current_esp="$(read_shell_var_from_file "$limine_defaults" ESP_PATH)"
 
-    if [[ "$current_esp" != "$esp_target" ]]; then
-        backup_file "$limine_defaults"
-        set_shell_var "$limine_defaults" ESP_PATH "$esp_target"
-        info "Configured ESP_PATH=${esp_target}"
-        NEEDS_LIMINE_UPDATE=true
+    # Do NOT force-add ESP_PATH when absent.
+    # Evidence from your Arch logs shows it does not persist there and causes
+    # needless rewrites + limine-update on every rerun.
+    # Only correct it if an explicit key already exists but is wrong.
+    if shell_var_key_present "$limine_defaults" ESP_PATH; then
+        current_esp="$(read_shell_var_from_file "$limine_defaults" ESP_PATH)"
+        if [[ "$current_esp" != "$esp_target" ]]; then
+            backup_file "$limine_defaults"
+            set_shell_var "$limine_defaults" ESP_PATH "$esp_target"
+            info "Configured ESP_PATH=${esp_target}"
+            NEEDS_LIMINE_UPDATE=true
+        fi
     fi
 
     if ! shell_var_key_present "$limine_defaults" BOOT_ORDER; then
