@@ -297,7 +297,7 @@ verify_snapper_works() {
 }
 
 tune_snapper() {
-    sudo snapper -c "$1" set-config TIMELINE_CREATE="no" NUMBER_CLEANUP="yes" NUMBER_LIMIT="10" NUMBER_LIMIT_IMPORTANT="5" SPACE_LIMIT="0.0" FREE_LIMIT="0.0"
+    sudo snapper -c "$1" set-config TIMELINE_CREATE="no" NUMBER_CLEANUP="yes" NUMBER_LIMIT="5" NUMBER_LIMIT_IMPORTANT="5" SPACE_LIMIT="0.0" FREE_LIMIT="0.0"
 }
 
 quiesce_snapper() {
