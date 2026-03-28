@@ -113,6 +113,15 @@ atomic_write() {
     sudo sync -f "$target_dir" 2>/dev/null || true
 }
 
+atomic_write_if_changed() {
+    local target="$1" src="$2"
+    if sudo test -f "$target" && sudo cmp -s "$src" "$target"; then
+        return 1
+    fi
+    atomic_write "$target" "$src"
+    return 0
+}
+
 load_mount_info() {
     local target="$1"
     [[ -v CACHE_MNT_SOURCE["$target"] ]] && return 0
@@ -491,6 +500,13 @@ ensure_fstab_entry_for_snapshots() {
         fatal "Generated fstab failed libmount validation."
     fi
 
+    if sudo test -f /etc/fstab && sudo cmp -s "$tmp" /etc/fstab; then
+        rm -f "$tmp"
+        remove_array_value ACTIVE_TEMP_FILES "$tmp"
+        info "/etc/fstab already contains the correct snapshot entries."
+        return 0
+    fi
+
     backup_file /etc/fstab
     atomic_write /etc/fstab "$tmp"
     rm -f "$tmp"
@@ -512,12 +528,51 @@ verify_snapper_works() {
     sudo snapper -c "$1" list >/dev/null 2>&1 || fatal "Snapper $1 config is broken."
 }
 
+snapper_cleanup_counts() {
+    sudo snapper --csv -c "$1" list 2>/dev/null | awk -F',' '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "number") num_col = i
+                else if ($i == "cleanup") cleanup_col = i
+            }
+            next
+        }
+        num_col && cleanup_col &&
+        $num_col ~ /^[0-9]+$/ &&
+        $num_col != "0" {
+            if ($cleanup_col == "number") number_count++
+            else if ($cleanup_col == "important") important_count++
+        }
+        END {
+            printf "%d %d\n", number_count + 0, important_count + 0
+        }
+    '
+}
+
 tune_snapper() {
-    sudo snapper -c "$1" set-config \
+    local cfg="$1"
+    local default_limit=5 reserve=3
+    local number_count=0 important_count=0
+    local number_limit="$default_limit" important_limit="$default_limit"
+
+    read -r number_count important_count < <(snapper_cleanup_counts "$cfg")
+
+    if (( number_count > default_limit )); then
+        number_limit=$(( number_count + reserve ))
+    fi
+    if (( important_count > default_limit )); then
+        important_limit=$(( important_count + reserve ))
+    fi
+
+    if (( number_limit > default_limit || important_limit > default_limit )); then
+        warn "Preserving existing ${cfg} snapshot history by using adaptive cleanup limits: NUMBER_LIMIT=${number_limit}, NUMBER_LIMIT_IMPORTANT=${important_limit}"
+    fi
+
+    sudo snapper -c "$cfg" set-config \
         TIMELINE_CREATE="no" \
         NUMBER_CLEANUP="yes" \
-        NUMBER_LIMIT="5" \
-        NUMBER_LIMIT_IMPORTANT="5" \
+        NUMBER_LIMIT="${number_limit}" \
+        NUMBER_LIMIT_IMPORTANT="${important_limit}" \
         SPACE_LIMIT="0.0" \
         FREE_LIMIT="0.0"
 }
@@ -533,8 +588,27 @@ apply_global_btrfs_tuning() {
     info "Applied global Btrfs tuning parameters."
 }
 
+write_tmpfiles_override() {
+    local target="$1" content="$2" tmp
+    tmp="$(mktemp)"
+    ACTIVE_TEMP_FILES+=("$tmp")
+    printf '%s\n' "$content" > "$tmp"
+
+    if sudo test -f "$target" && sudo cmp -s "$tmp" "$target"; then
+        rm -f "$tmp"
+        remove_array_value ACTIVE_TEMP_FILES "$tmp"
+        return 1
+    fi
+
+    backup_file "$target"
+    atomic_write "$target" "$tmp"
+    rm -f "$tmp"
+    remove_array_value ACTIVE_TEMP_FILES "$tmp"
+    return 0
+}
+
 enforce_flat_topology() {
-    local sv tmp
+    local sv changed=false
 
     for sv in /var/lib/machines /var/lib/portables; do
         if findmnt -M "$sv" >/dev/null 2>&1; then
@@ -555,21 +629,19 @@ enforce_flat_topology() {
 
     sudo mkdir -p /etc/tmpfiles.d
 
-    tmp="$(mktemp)"
-    ACTIVE_TEMP_FILES+=("$tmp")
-    echo "d /var/lib/machines 0755 - - -" > "$tmp"
-    atomic_write /etc/tmpfiles.d/systemd-nspawn.conf "$tmp"
-    rm -f "$tmp"
-    remove_array_value ACTIVE_TEMP_FILES "$tmp"
+    if write_tmpfiles_override /etc/tmpfiles.d/systemd-nspawn.conf "d /var/lib/machines 0755 - - -"; then
+        changed=true
+    fi
 
-    tmp="$(mktemp)"
-    ACTIVE_TEMP_FILES+=("$tmp")
-    echo "d /var/lib/portables 0755 - - -" > "$tmp"
-    atomic_write /etc/tmpfiles.d/portables.conf "$tmp"
-    rm -f "$tmp"
-    remove_array_value ACTIVE_TEMP_FILES "$tmp"
+    if write_tmpfiles_override /etc/tmpfiles.d/portables.conf "d /var/lib/portables 0755 - - -"; then
+        changed=true
+    fi
 
-    info "Applied systemd tmpfiles overrides to permanently enforce flat Btrfs topology."
+    if [[ "$changed" == true ]]; then
+        info "Applied systemd tmpfiles overrides to permanently enforce flat Btrfs topology."
+    else
+        info "Flat-topology tmpfiles overrides are already correct."
+    fi
 }
 
 preflight_checks() {
@@ -586,6 +658,7 @@ preflight_checks() {
     require_cmd stat
     require_cmd mktemp
     require_cmd mountpoint
+    require_cmd btrfs
     [[ "$(stat -f -c %T /)" == "btrfs" ]] || fatal "Root is not Btrfs."
     [[ "$(stat -f -c %T /home)" == "btrfs" ]] || fatal "/home is not Btrfs."
     sudo -v || fatal "Cannot obtain sudo privileges."
