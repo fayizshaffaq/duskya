@@ -352,179 +352,201 @@ register_child() {
 
 populate_config_cache() {
     CONFIG_CACHE=()
-    
-    # Safely load the entire file byte-for-byte, preserving EOF newlines
-    local file_content
-    if ! file_content=$(cat -- "$CONFIG_FILE" 2>/dev/null; printf "x"); then
-        log_err "Failed to read config file."
+
+    if [[ ! -r "$CONFIG_FILE" ]]; then
+        log_err "Config file not readable: $CONFIG_FILE"
         return 1
     fi
-    file_content="${file_content%x}"
-    
+
     local parsed_data
-    if ! parsed_data=$(FILE_CONTENT="$file_content" LC_ALL=C awk '
-        function trim(s) {
-            sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s
-        }
-        function advance_comment(    j, eqs, end_pat, end_idx) {
-            i += 2
-            if (substr(file, i, 1) == "[") {
-                eqs = ""; j = i + 1
-                while (j <= len && substr(file, j, 1) == "=") { eqs = eqs "="; j++ }
-                if (substr(file, j, 1) == "[") {
-                    i = j + 1; end_pat = "]" eqs "]"
-                    end_idx = index(substr(file, i), end_pat)
-                    if (end_idx > 0) i += end_idx - 1 + length(end_pat)
-                    else i = len + 1
-                    return
-                }
-            }
-            end_idx = index(substr(file, i), "\n")
-            if (end_idx > 0) i += end_idx
-            else i = len + 1
-        }
-        function advance_string(    q, c) {
-            q = substr(file, i, 1); tok_start = i; i++
-            while (i <= len) {
-                c = substr(file, i, 1)
-                if (c == "\\") { i += 2; continue }
-                if (c == q) { i++; break }
-                i++
-            }
-        }
-        function advance_long_string(    j, eqs, end_pat, end_idx) {
-            eqs = ""; j = i + 1
-            while (j <= len && substr(file, j, 1) == "=") { eqs = eqs "="; j++ }
-            if (substr(file, j, 1) == "[") {
-                i = j + 1; tok_start = i - 2 - length(eqs)
-                end_pat = "]" eqs "]"
-                end_idx = index(substr(file, i), end_pat)
-                if (end_idx > 0) i += end_idx - 1 + length(end_pat)
-                else i = len + 1
-                return 1
-            }
-            return 0
-        }
-        function next_token(    c) {
-            while (i <= len) {
-                c = substr(file, i, 1)
-                if (c == " " || c == "\t" || c == "\r") { i++; continue }
-                if (c == "\n") { tok_type = "NEWLINE"; tok_val = "\n"; tok_start = i; i++; return 1 }
-                if (c == "-" && substr(file, i+1, 1) == "-") { advance_comment(); continue }
-                
-                if (c == "\"" || c == "\x27") {
-                    advance_string(); tok_type = "STRING"
-                    tok_val = substr(file, tok_start, i - tok_start); return 1
-                }
-                if (c == "[") {
-                    if (advance_long_string()) {
-                        tok_type = "STRING"; tok_val = substr(file, tok_start, i - tok_start); return 1
-                    }
-                    tok_type = "LBRACK"; tok_val = "["; tok_start = i; i++; return 1
-                }
-                if (c == "}") { tok_type = "RBRACE"; tok_val = "}"; tok_start = i; i++; return 1 }
-                if (c == "{") { tok_type = "LBRACE"; tok_val = "{"; tok_start = i; i++; return 1 }
-                if (c == "(") { tok_type = "LPAREN"; tok_val = "("; tok_start = i; i++; return 1 }
-                if (c == ")") { tok_type = "RPAREN"; tok_val = ")"; tok_start = i; i++; return 1 }
-                if (c == "=" && substr(file, i+1, 1) != "=") { tok_type = "EQUALS"; tok_val = "="; tok_start = i; i++; return 1 }
-                if (c == "=" && substr(file, i+1, 1) == "=") { tok_type = "OP"; tok_val = "=="; i+=2; return 1 }
-                if (c == "~" && substr(file, i+1, 1) == "=") { tok_type = "OP"; i+=2; continue }
-                if (c == "<" && substr(file, i+1, 1) == "=") { tok_type = "OP"; i+=2; continue }
-                if (c == ">" && substr(file, i+1, 1) == "=") { tok_type = "OP"; i+=2; continue }
-                if (c == ",") { tok_type = "COMMA"; tok_val = ","; tok_start = i; i++; return 1 }
-                if (c == ";") { tok_type = "SEMI"; tok_val = ";"; tok_start = i; i++; return 1 }
-                if (c == "]") { tok_type = "RBRACK"; tok_val = "]"; tok_start = i; i++; return 1 }
-                
-                if (c ~ /[a-zA-Z_0-9.]/) {
-                    tok_start = i
-                    while (i <= len && substr(file, i, 1) ~ /[a-zA-Z_0-9.]/) i++
-                    tok_type = "IDENT"; tok_val = substr(file, tok_start, i - tok_start); return 1
-                }
-                tok_type = "OTHER"; tok_val = c; tok_start = i; i++; return 1
-            }
-            return 0
-        }
+    if ! parsed_data=$(LC_ALL=C awk -v MODE="READ" '
         BEGIN {
-            file = ENVIRON["FILE_CONTENT"]
+            file = ""
+            while (getline line > 0) {
+                file = file line "\n"
+            }
             len = length(file)
-            i = 1; depth = 0; in_assignment = 0; last_key = ""; curr_key = ""; nesting = 0; val_start = 0
             
-            while (next_token()) {
-                if (in_assignment) {
-                    if (tok_type == "LBRACE" || tok_type == "LBRACK" || tok_type == "LPAREN") { nesting++; continue }
-                    if (tok_type == "RBRACE" || tok_type == "RBRACK" || tok_type == "RPAREN") {
-                        if (nesting > 0) { nesting--; continue }
+            # Lexical Analyzer
+            pos = 1; tok_count = 0
+            while (pos <= len) {
+                c = substr(file, pos, 1)
+                if (c ~ /[ \t\r\n]/) { pos++; continue }
+                
+                # Comments
+                if (c == "-" && substr(file, pos+1, 1) == "-") {
+                    start_pos = pos; pos += 2; eqs = ""; tmp_pos = pos
+                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
+                    if (substr(file, tmp_pos, 1) == "[") {
+                        tmp_pos++; end_pat = "]" eqs "]"
+                        end_idx = index(substr(file, tmp_pos), end_pat)
+                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
+                        else pos = len + 1
+                    } else {
+                        end_idx = index(substr(file, pos), "\n")
+                        if (end_idx > 0) pos += end_idx - 1
+                        else pos = len + 1
                     }
-                    
-                    is_end = 0
-                    if (nesting == 0) {
-                        if (tok_type == "COMMA" || tok_type == "SEMI" || tok_type == "RBRACE") is_end = 1
-                        else if (tok_type == "NEWLINE" && depth == 0) is_end = 1
+                    continue
+                }
+                
+                tok_start = pos
+                
+                # Long Strings and LBRACK
+                if (c == "[") {
+                    eqs = ""; tmp_pos = pos + 1
+                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
+                    if (substr(file, tmp_pos, 1) == "[") {
+                        tmp_pos++; end_pat = "]" eqs "]"
+                        end_idx = index(substr(file, tmp_pos), end_pat)
+                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
+                        else pos = len + 1
+                        tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                        T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
                     }
+                    tok_count++; T_TYPE[tok_count] = "LBRACK"; T_VAL[tok_count] = "["; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++; continue
+                }
+                
+                # Short Strings
+                if (c == "\"" || c == "\x27") {
+                    quote = c; pos++
+                    while (pos <= len) {
+                        sc = substr(file, pos, 1)
+                        if (sc == "\\") { pos += 2; continue }
+                        if (sc == quote) { pos++; break }
+                        pos++
+                    }
+                    tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
+                }
+                
+                # Identifiers
+                if (c ~ /[a-zA-Z_]/) {
+                    while (pos <= len && substr(file, pos, 1) ~ /[a-zA-Z_0-9]/) pos++
+                    tok_count++; T_TYPE[tok_count] = "IDENT"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
+                }
+                
+                # Structural Symbols
+                if (c == "{") type = "LBRACE"
+                else if (c == "}") type = "RBRACE"
+                else if (c == "]") type = "RBRACK"
+                else if (c == "=") type = "EQUALS"
+                else if (c == ",") type = "COMMA"
+                else if (c == ";") type = "SEMI"
+                else if (c == "(") type = "LPAREN"
+                else if (c == ")") type = "RPAREN"
+                else if (c == "<") type = "LANGLE"
+                else if (c == ">") type = "RANGLE"
+                else {
+                    while (pos <= len) {
+                        sc = substr(file, pos, 1)
+                        if (sc ~ /[ \t\r\n\-"\x27\[\]{}=,;()<>a-zA-Z_]/) break
+                        pos++
+                    }
+                    tok_count++; T_TYPE[tok_count] = "OTHER"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
+                }
+                tok_count++; T_TYPE[tok_count] = type; T_VAL[tok_count] = c; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++
+            }
+        }
+        
+        function unquote_string(s,   q, out, k, cx, nx) {
+            q = substr(s, 1, 1)
+            if (q != "\"" && q != "\x27") {
+                sub(/^\[=*\[/, "", s); sub(/\]=*\]$/, "", s)
+                if (substr(s, 1, 1) == "\n") s = substr(s, 2)
+                return s
+            }
+            s = substr(s, 2, length(s)-2); out = ""; k = 1
+            while (k <= length(s)) {
+                cx = substr(s, k, 1)
+                if (cx == "\\") {
+                    nx = substr(s, k+1, 1)
+                    if (nx == "n") out = out "\n"
+                    else if (nx == "r") out = out "\r"
+                    else if (nx == "t") out = out "\t"
+                    else if (nx == "\\") out = out "\\"
+                    else if (nx == "\"" || nx == "\x27") out = out nx
+                    else out = out "\\" nx
+                    k += 2
+                } else { out = out cx; k++ }
+            }
+            return out
+        }
+        
+        function process_value(val) {
+            if (match(val, /^\[=*\[/) || match(val, /^["\x27]/)) return unquote_string(val)
+            return val
+        }
+
+        END {
+            i = 1; depth = 0; pending_key = ""
+            while (i <= tok_count) {
+                t = T_TYPE[i]; v = T_VAL[i]
+                
+                if (t == "LBRACE") {
+                    depth++; scope_stack[depth] = pending_key; pending_key = ""; i++; continue
+                }
+                if (t == "RBRACE") {
+                    if (depth > 0) delete scope_stack[depth--]; i++; continue
+                }
+                if (t == "IDENT" && (v == "local" || v == "return")) { i++; continue }
+                
+                key_name = ""; is_key = 0
+                if (t == "IDENT") {
+                    key_name = v; is_key = 1
+                    if (T_TYPE[i+1] == "LANGLE") {
+                        j = i + 1; while (j <= tok_count && T_TYPE[j] != "RANGLE") j++; i = j
+                    }
+                } else if (t == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK") {
+                    key_name = unquote_string(T_VAL[i+1]); is_key = 1; i += 2
+                }
+                
+                if (is_key && T_TYPE[i+1] == "EQUALS") {
+                    i += 2; curr_key = key_name
+                    if (T_TYPE[i] == "LBRACE") { pending_key = curr_key; continue }
                     
-                    if (is_end) {
-                        raw_val = substr(file, val_start, tok_start - val_start)
-                        val = trim(raw_val)
-                        
-                        if (match(val, /^\[=*\[/)) {
-                            match(val, /^\[=*\[/); pref_len = RLENGTH
-                            val = substr(val, pref_len + 1)
-                            match(val, /\]=*\]$/)
-                            if (RLENGTH > 0) val = substr(val, 1, length(val) - RLENGTH)
-                            if (substr(val, 1, 1) == "\n") val = substr(val, 2)
-                        } else if (match(val, /^["\x27]/)) {
-                            val = substr(val, 2, length(val) - 2)
+                    rhs_start = i; rhs_end = i; nesting = 0
+                    while (i <= tok_count) {
+                        nt = T_TYPE[i]
+                        if (nt == "LBRACE" || nt == "LBRACK" || nt == "LPAREN") nesting++
+                        if (nt == "RBRACE" || nt == "RBRACK" || nt == "RPAREN") nesting--
+                        if (nesting < 0) break
+                        if (nesting == 0) {
+                            if (nt == "COMMA" || nt == "SEMI") break
+                            if (depth == 0 && i > rhs_start) {
+                                if ((nt == "IDENT" && T_TYPE[i+1] == "EQUALS") ||
+                                    (nt == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK" && T_TYPE[i+3] == "EQUALS") ||
+                                    (nt == "IDENT" && T_TYPE[i+1] == "LANGLE")) break
+                            }
                         }
-                        
+                        rhs_end = i; i++
+                    }
+                    
+                    if (rhs_end >= rhs_start) {
+                        v_start = T_START[rhs_start]; v_end = T_END[rhs_end]
+                        raw_val = substr(file, v_start, v_end - v_start + 1)
                         curr_scope = ""
                         for (s = 1; s <= depth; s++) {
                             if (scope_stack[s] != "") curr_scope = curr_scope (curr_scope != "" ? "/" : "") scope_stack[s]
                         }
-                        
-                        clean_key = curr_key
-                        if (match(clean_key, /^\[/)) {
-                            sub(/^\[[ \t]*["\x27]?/, "", clean_key)
-                            sub(/["\x27]?[ \t]*\]$/, "", clean_key)
-                        } else if (match(clean_key, /^["\x27]/)) {
-                            clean_key = substr(clean_key, 2, length(clean_key)-2)
-                        }
-                        
-                        # Use ASCII 31 (US) and 30 (RS) to safely transport multiline values through Bash
-                        printf "%s\x1F%s\x1F%s\x1E", clean_key, curr_scope, val
-                        
-                        in_assignment = 0
-                        if (tok_type == "RBRACE" && depth > 0) delete scope_stack[depth--]
-                        continue
+                        printf "%s\0%s\0%s\0", curr_key, curr_scope, process_value(raw_val)
                     }
                     continue
                 }
-                
-                if (tok_type == "IDENT" || tok_type == "STRING") {
-                    if (tok_type == "IDENT" && tok_val == "local") continue
-                    last_key = tok_val; continue
-                }
-                if (tok_type == "EQUALS") {
-                    if (last_key != "") {
-                        curr_key = last_key; in_assignment = 1; val_start = i; nesting = 0
-                    }
-                    continue
-                }
-                if (tok_type == "LBRACE") {
-                    depth++; scope_stack[depth] = last_key; last_key = ""; continue
-                }
-                if (tok_type == "RBRACE") {
-                    if (depth > 0) delete scope_stack[depth--]; continue
-                }
-                if (tok_type != "NEWLINE" && tok_type != "COMMENT") last_key = ""
+                i++
             }
         }
-    '); then
-        log_err "Parser failed."
+    ' < "$CONFIG_FILE"); then
+        log_err "Parser failed on $CONFIG_FILE"
         return 1
     fi
-    
+
     local key_part scope_part value_part cache_key
-    while IFS=$'\x1F' read -r -d $'\x1E' key_part scope_part value_part; do
+    while IFS= read -r -d $'\0' key_part &&
+          IFS= read -r -d $'\0' scope_part &&
+          IFS= read -r -d $'\0' value_part; do
         [[ -z "$key_part" ]] && continue
         cache_key="${key_part}|${scope_part}"
         CONFIG_CACHE["$cache_key"]="$value_part"
@@ -542,191 +564,212 @@ write_value_to_file() {
         return 0
     fi
 
+    if [[ ! -r "$CONFIG_FILE" ]]; then
+        set_status "Config file not readable."
+        return 1
+    fi
+
     create_tmpfile || {
         set_status "Atomic save unavailable."
         return 1
     }
-    
-    local file_content
-    if ! file_content=$(cat -- "$CONFIG_FILE" 2>/dev/null; printf "x"); then
-        set_status "Failed to read config file."
-        return 1
-    fi
-    file_content="${file_content%x}"
 
-    TARGET_SCOPE="$block" TARGET_KEY="$key" NEW_VALUE="$new_val" \
-    FILE_CONTENT="$file_content" LC_ALL=C awk '
-        function trim(s) {
-            sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s
-        }
-        function advance_comment(    j, eqs, end_pat, end_idx) {
-            i += 2
-            if (substr(file, i, 1) == "[") {
-                eqs = ""; j = i + 1
-                while (j <= len && substr(file, j, 1) == "=") { eqs = eqs "="; j++ }
-                if (substr(file, j, 1) == "[") {
-                    i = j + 1; end_pat = "]" eqs "]"
-                    end_idx = index(substr(file, i), end_pat)
-                    if (end_idx > 0) i += end_idx - 1 + length(end_pat)
-                    else i = len + 1
-                    return
+    local has_trailing="false"
+    if [[ "$(tail -c 1 "$CONFIG_FILE" 2>/dev/null)" == $'\n' ]]; then
+        has_trailing="true"
+    fi
+
+    if ! HAS_TRAILING="$has_trailing" TARGET_SCOPE="$block" TARGET_KEY="$key" NEW_VAL="$new_val" LC_ALL=C awk '
+        BEGIN {
+            file = ""
+            while (getline line > 0) {
+                file = file line "\n"
+            }
+            len = length(file)
+            
+            # Lexical Analyzer
+            pos = 1; tok_count = 0
+            while (pos <= len) {
+                c = substr(file, pos, 1)
+                if (c ~ /[ \t\r\n]/) { pos++; continue }
+                
+                if (c == "-" && substr(file, pos+1, 1) == "-") {
+                    start_pos = pos; pos += 2; eqs = ""; tmp_pos = pos
+                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
+                    if (substr(file, tmp_pos, 1) == "[") {
+                        tmp_pos++; end_pat = "]" eqs "]"
+                        end_idx = index(substr(file, tmp_pos), end_pat)
+                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
+                        else pos = len + 1
+                    } else {
+                        end_idx = index(substr(file, pos), "\n")
+                        if (end_idx > 0) pos += end_idx - 1
+                        else pos = len + 1
+                    }
+                    continue
                 }
-            }
-            end_idx = index(substr(file, i), "\n")
-            if (end_idx > 0) i += end_idx
-            else i = len + 1
-        }
-        function advance_string(    q, c) {
-            q = substr(file, i, 1); tok_start = i; i++
-            while (i <= len) {
-                c = substr(file, i, 1)
-                if (c == "\\") { i += 2; continue }
-                if (c == q) { i++; break }
-                i++
-            }
-        }
-        function advance_long_string(    j, eqs, end_pat, end_idx) {
-            eqs = ""; j = i + 1
-            while (j <= len && substr(file, j, 1) == "=") { eqs = eqs "="; j++ }
-            if (substr(file, j, 1) == "[") {
-                i = j + 1; tok_start = i - 2 - length(eqs)
-                end_pat = "]" eqs "]"
-                end_idx = index(substr(file, i), end_pat)
-                if (end_idx > 0) i += end_idx - 1 + length(end_pat)
-                else i = len + 1
-                return 1
-            }
-            return 0
-        }
-        function next_token(    c) {
-            while (i <= len) {
-                c = substr(file, i, 1)
-                if (c == " " || c == "\t" || c == "\r") { i++; continue }
-                if (c == "\n") { tok_type = "NEWLINE"; tok_val = "\n"; tok_start = i; i++; return 1 }
-                if (c == "-" && substr(file, i+1, 1) == "-") { advance_comment(); continue }
+                
+                tok_start = pos
+                
+                if (c == "[") {
+                    eqs = ""; tmp_pos = pos + 1
+                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
+                    if (substr(file, tmp_pos, 1) == "[") {
+                        tmp_pos++; end_pat = "]" eqs "]"
+                        end_idx = index(substr(file, tmp_pos), end_pat)
+                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
+                        else pos = len + 1
+                        tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                        T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
+                    }
+                    tok_count++; T_TYPE[tok_count] = "LBRACK"; T_VAL[tok_count] = "["; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++; continue
+                }
                 
                 if (c == "\"" || c == "\x27") {
-                    advance_string(); tok_type = "STRING"
-                    tok_val = substr(file, tok_start, i - tok_start); return 1
-                }
-                if (c == "[") {
-                    if (advance_long_string()) {
-                        tok_type = "STRING"; tok_val = substr(file, tok_start, i - tok_start); return 1
+                    quote = c; pos++
+                    while (pos <= len) {
+                        sc = substr(file, pos, 1)
+                        if (sc == "\\") { pos += 2; continue }
+                        if (sc == quote) { pos++; break }
+                        pos++
                     }
-                    tok_type = "LBRACK"; tok_val = "["; tok_start = i; i++; return 1
+                    tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
                 }
-                if (c == "}") { tok_type = "RBRACE"; tok_val = "}"; tok_start = i; i++; return 1 }
-                if (c == "{") { tok_type = "LBRACE"; tok_val = "{"; tok_start = i; i++; return 1 }
-                if (c == "(") { tok_type = "LPAREN"; tok_val = "("; tok_start = i; i++; return 1 }
-                if (c == ")") { tok_type = "RPAREN"; tok_val = ")"; tok_start = i; i++; return 1 }
-                if (c == "=" && substr(file, i+1, 1) != "=") { tok_type = "EQUALS"; tok_val = "="; tok_start = i; i++; return 1 }
-                if (c == "=" && substr(file, i+1, 1) == "=") { tok_type = "OP"; tok_val = "=="; i+=2; return 1 }
-                if (c == "~" && substr(file, i+1, 1) == "=") { tok_type = "OP"; i+=2; continue }
-                if (c == "<" && substr(file, i+1, 1) == "=") { tok_type = "OP"; i+=2; continue }
-                if (c == ">" && substr(file, i+1, 1) == "=") { tok_type = "OP"; i+=2; continue }
-                if (c == ",") { tok_type = "COMMA"; tok_val = ","; tok_start = i; i++; return 1 }
-                if (c == ";") { tok_type = "SEMI"; tok_val = ";"; tok_start = i; i++; return 1 }
-                if (c == "]") { tok_type = "RBRACK"; tok_val = "]"; tok_start = i; i++; return 1 }
                 
-                if (c ~ /[a-zA-Z_0-9.]/) {
-                    tok_start = i
-                    while (i <= len && substr(file, i, 1) ~ /[a-zA-Z_0-9.]/) i++
-                    tok_type = "IDENT"; tok_val = substr(file, tok_start, i - tok_start); return 1
+                if (c ~ /[a-zA-Z_]/) {
+                    while (pos <= len && substr(file, pos, 1) ~ /[a-zA-Z_0-9]/) pos++
+                    tok_count++; T_TYPE[tok_count] = "IDENT"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
                 }
-                tok_type = "OTHER"; tok_val = c; tok_start = i; i++; return 1
+                
+                if (c == "{") type = "LBRACE"
+                else if (c == "}") type = "RBRACE"
+                else if (c == "]") type = "RBRACK"
+                else if (c == "=") type = "EQUALS"
+                else if (c == ",") type = "COMMA"
+                else if (c == ";") type = "SEMI"
+                else if (c == "(") type = "LPAREN"
+                else if (c == ")") type = "RPAREN"
+                else if (c == "<") type = "LANGLE"
+                else if (c == ">") type = "RANGLE"
+                else {
+                    while (pos <= len) {
+                        sc = substr(file, pos, 1)
+                        if (sc ~ /[ \t\r\n\-"\x27\[\]{}=,;()<>a-zA-Z_]/) break
+                        pos++
+                    }
+                    tok_count++; T_TYPE[tok_count] = "OTHER"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
+                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
+                }
+                tok_count++; T_TYPE[tok_count] = type; T_VAL[tok_count] = c; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++
             }
-            return 0
         }
-        BEGIN {
-            file = ENVIRON["FILE_CONTENT"]
-            len = length(file)
-            i = 1; depth = 0; in_assignment = 0; last_key = ""; curr_key = ""; nesting = 0; val_start = 0
-            target_found = 0
-            
-            while (next_token()) {
-                if (in_assignment) {
-                    if (tok_type == "LBRACE" || tok_type == "LBRACK" || tok_type == "LPAREN") { nesting++; continue }
-                    if (tok_type == "RBRACE" || tok_type == "RBRACK" || tok_type == "RPAREN") {
-                        if (nesting > 0) { nesting--; continue }
+        
+        function unquote_string(s,   q, out, k, cx, nx) {
+            q = substr(s, 1, 1)
+            if (q != "\"" && q != "\x27") {
+                sub(/^\[=*\[/, "", s); sub(/\]=*\]$/, "", s)
+                if (substr(s, 1, 1) == "\n") s = substr(s, 2)
+                return s
+            }
+            s = substr(s, 2, length(s)-2); out = ""; k = 1
+            while (k <= length(s)) {
+                cx = substr(s, k, 1)
+                if (cx == "\\") {
+                    nx = substr(s, k+1, 1)
+                    if (nx == "n") out = out "\n"
+                    else if (nx == "r") out = out "\r"
+                    else if (nx == "t") out = out "\t"
+                    else if (nx == "\\") out = out "\\"
+                    else if (nx == "\"" || nx == "\x27") out = out nx
+                    else out = out "\\" nx
+                    k += 2
+                } else { out = out cx; k++ }
+            }
+            return out
+        }
+
+        END {
+            i = 1; depth = 0; pending_key = ""; found = 0
+            while (i <= tok_count) {
+                t = T_TYPE[i]; v = T_VAL[i]
+                if (t == "LBRACE") { depth++; scope_stack[depth] = pending_key; pending_key = ""; i++; continue }
+                if (t == "RBRACE") { if (depth > 0) delete scope_stack[depth--]; i++; continue }
+                if (t == "IDENT" && (v == "local" || v == "return")) { i++; continue }
+                
+                key_name = ""; is_key = 0
+                if (t == "IDENT") {
+                    key_name = v; is_key = 1
+                    if (T_TYPE[i+1] == "LANGLE") {
+                        j = i + 1; while (j <= tok_count && T_TYPE[j] != "RANGLE") j++; i = j
+                    }
+                } else if (t == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK") {
+                    key_name = unquote_string(T_VAL[i+1]); is_key = 1; i += 2
+                }
+                
+                if (is_key && T_TYPE[i+1] == "EQUALS") {
+                    i += 2; curr_key = key_name
+                    if (T_TYPE[i] == "LBRACE") { pending_key = curr_key; continue }
+                    
+                    rhs_start = i; rhs_end = i; nesting = 0
+                    while (i <= tok_count) {
+                        nt = T_TYPE[i]
+                        if (nt == "LBRACE" || nt == "LBRACK" || nt == "LPAREN") nesting++
+                        if (nt == "RBRACE" || nt == "RBRACK" || nt == "RPAREN") nesting--
+                        if (nesting < 0) break
+                        if (nesting == 0) {
+                            if (nt == "COMMA" || nt == "SEMI") break
+                            if (depth == 0 && i > rhs_start) {
+                                if ((nt == "IDENT" && T_TYPE[i+1] == "EQUALS") ||
+                                    (nt == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK" && T_TYPE[i+3] == "EQUALS") ||
+                                    (nt == "IDENT" && T_TYPE[i+1] == "LANGLE")) break
+                            }
+                        }
+                        rhs_end = i; i++
                     }
                     
-                    is_end = 0
-                    if (nesting == 0) {
-                        if (tok_type == "COMMA" || tok_type == "SEMI" || tok_type == "RBRACE") is_end = 1
-                        else if (tok_type == "NEWLINE" && depth == 0) is_end = 1
-                    }
-                    
-                    if (is_end) {
+                    if (rhs_end >= rhs_start) {
+                        v_start = T_START[rhs_start]; v_end = T_END[rhs_end]
                         curr_scope = ""
                         for (s = 1; s <= depth; s++) {
                             if (scope_stack[s] != "") curr_scope = curr_scope (curr_scope != "" ? "/" : "") scope_stack[s]
                         }
                         
-                        clean_key = curr_key
-                        if (match(clean_key, /^\[/)) {
-                            sub(/^\[[ \t]*["\x27]?/, "", clean_key)
-                            sub(/["\x27]?[ \t]*\]$/, "", clean_key)
-                        } else if (match(clean_key, /^["\x27]/)) {
-                            clean_key = substr(clean_key, 2, length(clean_key)-2)
+                        if (curr_key == ENVIRON["TARGET_KEY"] && curr_scope == ENVIRON["TARGET_SCOPE"]) {
+                            last_match_start = v_start; last_match_end = v_end
+                            last_match_raw = substr(file, v_start, v_end - v_start + 1)
+                            found = 1
                         }
-                        
-                        if (clean_key == ENVIRON["TARGET_KEY"] && curr_scope == ENVIRON["TARGET_SCOPE"]) {
-                            target_found = 1
-                            match_val_start = val_start
-                            match_tok_start = tok_start
-                            match_raw = substr(file, val_start, tok_start - val_start)
-                        }
-                        
-                        in_assignment = 0
-                        if (tok_type == "RBRACE" && depth > 0) delete scope_stack[depth--]
-                        continue
                     }
                     continue
                 }
-                
-                if (tok_type == "IDENT" || tok_type == "STRING") {
-                    if (tok_type == "IDENT" && tok_val == "local") continue
-                    last_key = tok_val; continue
-                }
-                if (tok_type == "EQUALS") {
-                    if (last_key != "") {
-                        curr_key = last_key; in_assignment = 1; val_start = i; nesting = 0
-                    }
-                    continue
-                }
-                if (tok_type == "LBRACE") {
-                    depth++; scope_stack[depth] = last_key; last_key = ""; continue
-                }
-                if (tok_type == "RBRACE") {
-                    if (depth > 0) delete scope_stack[depth--]; continue
-                }
-                if (tok_type != "NEWLINE" && tok_type != "COMMENT") last_key = ""
+                i++
             }
             
-            if (target_found) {
-                clean_raw = trim(match_raw)
-                new_v = ENVIRON["NEW_VALUE"]
-                
-                if (match(clean_raw, /^\[=*\[/)) {
-                    match(clean_raw, /^\[=*\[/); prefix = substr(clean_raw, RSTART, RLENGTH)
+            if (found) {
+                new_v = ENVIRON["NEW_VAL"]
+                if (match(last_match_raw, /^\[=*\[/)) {
+                    match(last_match_raw, /^\[=*\[/); prefix = substr(last_match_raw, RSTART, RLENGTH)
                     suffix = prefix; gsub(/\[/, "]", suffix)
+                    while (index(new_v, suffix) > 0) {
+                        prefix = "[" "=" substr(prefix, 2); suffix = "]" "=" substr(suffix, 2)
+                    }
                     new_v = prefix "\n" new_v suffix
-                } else if (match(clean_raw, /^["\x27]/)) {
-                    quote = substr(clean_raw, 1, 1)
-                    gsub(/\\/, "\\\\", new_v)
-                    gsub(/\n/, "\\n", new_v)
-                    gsub(/\r/, "\\r", new_v)
-                    gsub(quote, "\\" quote, new_v)
-                    new_v = quote new_v quote
+                } else if (match(last_match_raw, /^["\x27]/)) {
+                    quote = substr(last_match_raw, 1, 1)
+                    gsub(/\\/, "\\\\", new_v); gsub(/\n/, "\\n", new_v); gsub(/\r/, "\\r", new_v); gsub(/\t/, "\\t", new_v)
+                    gsub(quote, "\\" quote, new_v); new_v = quote new_v quote
                 }
                 
-                file = substr(file, 1, match_val_start - 1) " " new_v " " substr(file, match_tok_start)
+                file = substr(file, 1, last_match_start - 1) new_v substr(file, last_match_end + 1)
+                if (ENVIRON["HAS_TRAILING"] == "false") sub(/\n$/, "", file)
                 printf "%s", file
                 exit 0
             }
             exit 1
         }
-    ' > "$_TMPFILE" || {
+    ' < "$CONFIG_FILE" > "$_TMPFILE"; then
         rm -f -- "$_TMPFILE" 2>/dev/null || :
         _TMPFILE=""
         _TMPMODE=""
