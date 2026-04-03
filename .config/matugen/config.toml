@@ -43,6 +43,20 @@ output_path = '~/.config/matugen/generated/qt5ct-colors.conf'
 input_path  = '~/.config/matugen/templates/qtct-colors.conf'
 output_path = '~/.config/matugen/generated/qt6ct-colors.conf'
 
+[templates.kvantum_kvconfig]
+input_path = './templates/kvantum-colors.kvconfig'
+output_path = '~/.config/matugen/generatd/kvantum-matugen.kvconfig'
+post_hook = '''
+   ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.kvconfig" "$HOME/.config/Kvantum/matugen/matugen.kvconfig"
+'''
+
+[templates.kvantum_svg]
+input_path = './templates/kvantum-colors.svg'
+output_path = '~/.config/matugen/generatd/kvantum-matugen.svg'
+post_hook = '''
+   ln -nfs "$HOME/.config/matugen/generated/kkvantum-matugen.svg" "$HOME/.config/Kvantum/matugen/matugen.svg"
+'''
+
 # -----------------------------------------------------------------------------
 # System Components (Wayland, Bars, Notifications)
 # -----------------------------------------------------------------------------
