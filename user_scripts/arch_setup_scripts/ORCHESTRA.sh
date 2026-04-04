@@ -126,7 +126,7 @@ INSTALL_SEQUENCE=(
     "S | 395_intel_media_sdk_check.sh --auto"
     "U | 400_firefox_matugen_pywalfox.sh"
 #    "U | 405_spicetify_matugen_setup.sh"
-    "U | 410_waybar_swap_config.sh"
+    "U | 410_waybar_swap_config.sh --toggle"
     "U | 415_mpv_setup.sh"
 #    "U | 420_kokoro_gpu_setup.sh" #requires nvidia gpu with at least 4gb vram
 #    "U | 425_parakeet_gpu_setup.sh" #requires nvidia gpu with at least 4gb vram
