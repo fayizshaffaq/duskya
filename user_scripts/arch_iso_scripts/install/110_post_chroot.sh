@@ -35,7 +35,6 @@ trap 'printf "${RESET}\n"' EXIT
 
 # --- 3. Defaults & CLI ---
 DEFAULT_HOSTNAME="${DEFAULT_HOSTNAME:-workstation}"
-DEFAULT_USER="${DEFAULT_USER:-dusk}"
 DEFAULT_TZ="${DEFAULT_TZ:-Asia/Kolkata}"
 AUTO_MODE="${AUTO_MODE:-0}"
 readonly USER_GROUPS='wheel,input,audio,video,storage,optical,network,lp,power,games,rfkill'
@@ -50,13 +49,13 @@ Modes:
     Passwords are set interactively with passwd and retried until accepted.
 
   Auto (--auto or AUTO_MODE=1):
-    Uses defaults for hostname and username.
-    Requires ROOT_PASS and USER_PASS. If omitted, it will gracefully fallback
+    Uses defaults for hostname.
+    Requires TARGET_USER, ROOT_PASS, and USER_PASS. If omitted, it will gracefully fallback
     to interactive prompts (requires an active TTY).
 
 Optional environment variables:
   TARGET_HOSTNAME   Default: ${DEFAULT_HOSTNAME}
-  TARGET_USER       Default: ${DEFAULT_USER}
+  TARGET_USER       Required (will prompt if not provided)
   TARGET_TZ         Default: detected timezone or ${DEFAULT_TZ}
   ROOT_PASS         Password for root
   USER_PASS         Password for user
@@ -187,7 +186,7 @@ get_dynamic_timezone() {
 if [[ "$AUTO_MODE" != "1" ]]; then
     if has_tty; then
         if can_run_strict_auto; then
-            if prompt_yes_no "Run in autonomous mode (no further prompts; uses defaults for missing hostname/user/timezone)"; then
+            if prompt_yes_no "Run in autonomous mode (no further prompts; uses defaults for missing hostname/timezone)"; then
                 AUTO_MODE=1
             fi
         else
@@ -217,7 +216,20 @@ fi
 
 if [[ "$AUTO_MODE" == "1" ]]; then
     FINAL_HOST="${TARGET_HOSTNAME:-$DEFAULT_HOSTNAME}"
-    FINAL_USER="${TARGET_USER:-$DEFAULT_USER}"
+    
+    if [[ -n "${TARGET_USER:-}" ]]; then
+        FINAL_USER="$TARGET_USER"
+    else
+        ensure_tty
+        while true; do
+            read -r -p "Enter username for the new system: " INPUT_USER
+            if [[ -n "${INPUT_USER:-}" ]]; then
+                FINAL_USER="$INPUT_USER"
+                break
+            fi
+            log_error "Username cannot be empty. Please enter a valid username."
+        done
+    fi
 
     if ! can_run_strict_auto; then
         if ! has_tty; then
@@ -241,11 +253,14 @@ else
 
     if [[ -z "${TARGET_USER:-}" ]]; then
         ensure_tty
-        if ! read -r -p "Enter username [Default: ${DEFAULT_USER}]: " INPUT_USER; then
-            log_error "Failed to read username."
-            exit 1
-        fi
-        FINAL_USER="${INPUT_USER:-$DEFAULT_USER}"
+        while true; do
+            read -r -p "Enter username for the new system: " INPUT_USER
+            if [[ -n "${INPUT_USER:-}" ]]; then
+                FINAL_USER="$INPUT_USER"
+                break
+            fi
+            log_error "Username cannot be empty. Please enter a valid username."
+        done
     else
         FINAL_USER="$TARGET_USER"
     fi
