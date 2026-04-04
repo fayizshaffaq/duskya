@@ -23,6 +23,10 @@ readonly -a REPO_TARGETS=(
   power-profiles-daemon
   fluent-icon-theme-git
   swww
+
+  papirus-icon-theme-git
+  papirus-folders-git
+
 )
 
 # AUR Packages (yay/paru, no sudo)
