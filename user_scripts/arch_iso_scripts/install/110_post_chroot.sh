@@ -49,18 +49,17 @@ Modes:
     Prompts for missing hostname/user values.
     Passwords are set interactively with passwd and retried until accepted.
 
-  Strict auto (--auto or AUTO_MODE=1):
-    Prompts for nothing.
-    Requires:
-      ROOT_PASS
-      USER_PASS
+  Auto (--auto or AUTO_MODE=1):
+    Uses defaults for hostname and username.
+    Requires ROOT_PASS and USER_PASS. If omitted, it will gracefully fallback
+    to interactive prompts (requires an active TTY).
 
 Optional environment variables:
   TARGET_HOSTNAME   Default: ${DEFAULT_HOSTNAME}
   TARGET_USER       Default: ${DEFAULT_USER}
   TARGET_TZ         Default: detected timezone or ${DEFAULT_TZ}
-  ROOT_PASS         Required in strict auto
-  USER_PASS         Required in strict auto
+  ROOT_PASS         Password for root
+  USER_PASS         Password for user
 EOF
 }
 
@@ -221,8 +220,12 @@ if [[ "$AUTO_MODE" == "1" ]]; then
     FINAL_USER="${TARGET_USER:-$DEFAULT_USER}"
 
     if ! can_run_strict_auto; then
-        log_error "Strict auto mode requires non-empty ROOT_PASS and USER_PASS."
-        exit 1
+        if ! has_tty; then
+            log_error "Auto mode requires non-empty ROOT_PASS and USER_PASS when no TTY is present."
+            exit 1
+        else
+            log_info "AUTO_MODE enabled but credentials missing. Will prompt interactively."
+        fi
     fi
 else
     if [[ -z "${TARGET_HOSTNAME:-}" ]]; then
