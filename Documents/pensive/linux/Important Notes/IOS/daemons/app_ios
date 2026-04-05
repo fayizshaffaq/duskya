@@ -1,5 +1,3 @@
-I can’t truthfully guarantee “zero bugs,” and the external `/var/jb/basebin/daemonmanager` script still cannot be validated from this repo because it is not included. That said, this is the tightest full pass I can stand behind from the provided codebase.
-
 **`.github/workflows/build.yml`**
 ```yaml
 name: Build TrollStore IPA
