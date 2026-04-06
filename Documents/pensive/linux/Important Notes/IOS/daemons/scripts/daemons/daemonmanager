@@ -1,5 +1,5 @@
 #!/bin/sh
-# DaemonManager v8.2
+# DaemonManager v8.3
 # Scope:
 #   - Manages launchd services in the mobile user's bootstrap domain only.
 #   - Tracks only this script's own changes.
@@ -53,6 +53,7 @@ LAST_FAILURE_REASON=""
 LAST_CMD_OUTPUT=""
 LAST_NOOP=0
 LAST_RUN_DURATION_MS=0
+CURRENT_PROGRESS=""
 
 STEP_MODE=0
 BATCH_MODE=0
@@ -229,7 +230,7 @@ run_action_with_timing() {
     shift 3
 
     while :; do
-        info "$_verb: $_label"
+        info "${CURRENT_PROGRESS}${_verb}: $_label"
         _start_ms="$(now_ms)"
         "$_fn" "$_label" "$@"
         _rc=$?
@@ -1188,6 +1189,7 @@ process_toggle_batch() {
         _raw="$1"
         shift
         _processed=$((_processed + 1))
+        CURRENT_PROGRESS="[$_processed/$_requested] "
 
         _label="$(prepare_label "$_raw")" || {
             error "Invalid daemon: $_raw"
@@ -1303,6 +1305,7 @@ apply_config_file() {
         esac
 
         _processed=$((_processed + 1))
+        CURRENT_PROGRESS="[$_processed/$_requested] "
 
         set -- $_trimmed
 
@@ -1420,7 +1423,9 @@ reset_all() {
         [ -n "$_label" ] || continue
         [ -n "$_had_vis" ] || _had_vis="0"
         [ -n "$_pre_disabled" ] || _pre_disabled="0"
+        
         _processed=$((_processed + 1))
+        CURRENT_PROGRESS="[$_processed/$_total_tracked] "
 
         if is_assistivetouch_label "$_label"; then
             run_action_with_timing "Enabling" "$_label" enable_assistivetouch_restore_action
@@ -1464,9 +1469,27 @@ reset_all() {
     return 0
 }
 
+check_dependencies() {
+    _missing=0
+    
+    if ! command -v awk >/dev/null 2>&1; then
+        error "Missing dependency: awk (gawk). Please install it from Sileo."
+        _missing=1
+    fi
+
+    if ! resolve_python >/dev/null 2>&1; then
+        error "Missing dependency: python3. Please install it from Sileo."
+        _missing=1
+    fi
+
+    if [ "$_missing" -eq 1 ]; then
+        exit 1
+    fi
+}
+
 usage() {
     cat <<EOF
-DaemonManager v8.2 - Manage launchd services in $DOMAIN
+DaemonManager v8.3 - Manage launchd services in $DOMAIN
 
 Notes:
   - This script tracks only the services it changes.
@@ -1478,7 +1501,6 @@ Notes:
         On failures, you can retry; Enter skips to the next item.
       --config <path>, -c <path>
         Override the config file path for "apply" with no args or "apply-file".
-
 Config file:
   - Default name: daemon.cfg
   - Search order:
@@ -1513,6 +1535,8 @@ EOF
 }
 
 main() {
+    check_dependencies
+    
     while [ $# -gt 0 ]; do
         case "$1" in
             --step|-s)
