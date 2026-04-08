@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 #
 # Arch Linux Configuration Script (Chroot Phase)
-# Optimized for Bash 5+ | Arch Linux
+# Optimized for Bash 5+ | Arch Linux | Offline Target Environment
 #
-
-# Auto mode example:
-# TARGET_USER='myuser' ROOT_PASS='testroot' USER_PASS='testuser' ./003_post_chroot.sh --auto
 
 # --- 1. Safety & Environment ---
 set -Eeuo pipefail
@@ -56,7 +53,7 @@ Modes:
 Optional environment variables:
   TARGET_HOSTNAME   Default: ${DEFAULT_HOSTNAME}
   TARGET_USER       Required (will prompt if not provided)
-  TARGET_TZ         Default: detected timezone or ${DEFAULT_TZ}
+  TARGET_TZ         Default: ${DEFAULT_TZ}
   ROOT_PASS         Password for root
   USER_PASS         Password for user
 EOF
@@ -163,23 +160,11 @@ fi
 
 log_success "Chroot environment confirmed."
 
-# --- 5. Resilient Timezone Resolution ---
+# --- 5. Resilient Timezone Resolution (Offline) ---
 get_dynamic_timezone() {
-    local tz=""
-    local fallback_tz="$DEFAULT_TZ"
-
-    if command -v curl &>/dev/null; then
-        tz="$(curl -sSfL --retry 3 --retry-delay 1 --connect-timeout 3 https://ipapi.co/timezone 2>/dev/null || true)"
-        if [[ -z "$tz" ]]; then
-            tz="$(curl -sSfL --retry 2 --connect-timeout 3 http://ip-api.com/line?fields=timezone 2>/dev/null || true)"
-        fi
-    fi
-
-    if [[ -n "$tz" && -f "/usr/share/zoneinfo/$tz" ]]; then
-        printf '%s\n' "$tz"
-    else
-        printf '%s\n' "$fallback_tz"
-    fi
+    # In an offline environment, we cannot cURL an IP API.
+    # Return the static default gracefully.
+    printf '%s\n' "$DEFAULT_TZ"
 }
 
 # --- 6. Smart Mode Negotiation ---

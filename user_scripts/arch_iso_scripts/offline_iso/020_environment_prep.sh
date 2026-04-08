@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# MODULE: LIVE ENVIRONMENT PREP
-# Description: Font, Cowspace, Battery, Time, Keyring, Neovim
+# MODULE: LIVE ENVIRONMENT PREP (OFFLINE SAFE)
+# Description: Font, Cowspace, Battery, Time, Keyring
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -182,24 +182,15 @@ fi
 msg_info "Configuring Time (NTP)..."
 timedatectl set-ntp true
 
-# 5. Pacman Init, Keyring Refresh & Tools
-# Keep archlinux-keyring installation separate so the updated keyring is
-# available before verifying subsequent package downloads.
-msg_info "Initializing and Refreshing Pacman Keys..."
+# 5. Pacman Init (Offline Safe)
+msg_info "Initializing Local Pacman Keys..."
 
-msg_info "1/3: pacman-key --init"
+msg_info "1/2: pacman-key --init"
 pacman-key --init
-sleep 2
+sleep 1
 
-msg_info "2/3: pacman-key --populate archlinux"
+msg_info "2/2: pacman-key --populate archlinux"
 pacman-key --populate archlinux
-sleep 2
-
-msg_info "3/3: Installing latest archlinux-keyring..."
-pacman -Sy --needed --noconfirm archlinux-keyring
-sleep 2
-
-msg_info "Installing Tools (Neovim, Git, Curl)..."
-pacman -S --needed --noconfirm neovim git curl
+sleep 1
 
 msg_ok "Environment Ready."

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# MODULE: PACSTRAP (HARDWARE-VERIFIED & UNIFIED CACHE EDITION)
+# MODULE: PACSTRAP (HARDWARE-VERIFIED & OFFLINE CACHE EDITION)
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -21,14 +21,11 @@ AUTO_MODE=0
 USE_GENERIC_FIRMWARE=0
 HW_CACHE=""
 VM_DETECTED=0
-CONNECTIVITY_HOST=""
 
-# Base packages every system needs.
-# mkinitcpio is explicit to avoid the initramfs provider prompt and
-# to match what this install actually used successfully.
+# Base packages every system needs. Added zsh for immediate payload delivery.
 FINAL_PACKAGES=(
     base base-devel linux linux-headers mkinitcpio
-    neovim btrfs-progs dosfstools git
+    neovim btrfs-progs dosfstools git zsh
     networkmanager yazi linux-firmware-other
 )
 
@@ -50,7 +47,7 @@ EOF
 # --- Helper: Wait for pacman lock ---
 wait_for_pacman_lock() {
     while [[ -f /var/lib/pacman/db.lck ]]; do
-        log_warn "Waiting for pacman lock (reflector.service running?)..."
+        log_warn "Waiting for pacman lock..."
         sleep 3
     done
 }
@@ -88,18 +85,6 @@ ensure_live_tool() {
         wait_for_pacman_lock
         pacman -S --noconfirm --needed "$pkg" &>/dev/null
     fi
-}
-
-# --- Helper: Network Connectivity Check ---
-check_network_connectivity() {
-    local host
-    for host in google.com archlinux.org; do
-        if ping -c 1 -W 3 "$host" &>/dev/null; then
-            CONNECTIVITY_HOST="$host"
-            return 0
-        fi
-    done
-    return 1
 }
 
 # --- Helper: Unified Hardware Cache (PCI + USB) ---
@@ -213,7 +198,6 @@ if ! mountpoint -q "$MOUNT_POINT"; then
     exit 1
 fi
 
-# Ask once whether to enable autonomous mode if not already requested.
 if (( ! AUTO_MODE )); then
     if [[ -t 0 ]]; then
         if prompt_yes_no "Enable autonomous mode for this run (skip all prompts)?" "N"; then
@@ -225,18 +209,6 @@ if (( ! AUTO_MODE )); then
         log_warn "Non-interactive session detected. Enabling autonomous mode."
     fi
 fi
-
-echo -ne "[....] Checking network connectivity..."
-if ! check_network_connectivity; then
-    echo -e "\r[${C_RED}FAIL${C_RESET}] Checking network connectivity"
-    log_err "No internet connection. Could not reach google.com or archlinux.org."
-    exit 1
-fi
-echo -e "\r[${C_GREEN} OK ${C_RESET}] Checking network connectivity (${CONNECTIVITY_HOST})"
-
-wait_for_pacman_lock
-log_info "Syncing package databases..."
-pacman -Sy --noconfirm &>/dev/null
 
 # ==============================================================================
 # 2. CPU MICROCODE
