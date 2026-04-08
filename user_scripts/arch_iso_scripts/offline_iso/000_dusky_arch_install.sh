@@ -189,7 +189,6 @@ execute_script() {
     # Propagate Orchestrator arguments downward
     local child_args=()
     [[ -n "$script_args" ]] && read -ra appended_args <<< "$script_args" && child_args+=("${appended_args[@]}")
-    (( AUTO_MODE )) && child_args+=("--auto")
     (( DRY_RUN )) && child_args+=("--dry-run")
 
     # Retry Engine Mechanics
