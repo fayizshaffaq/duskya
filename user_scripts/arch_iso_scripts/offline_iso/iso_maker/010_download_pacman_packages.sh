@@ -179,7 +179,7 @@ trap '_cleanup' EXIT
 _print_logo() {
   printf '\n%s' "${BOLD}${CYAN}"
   printf '╔══════════════════════════════════════════════════════════════╗\n'
-  printf '║      Offline Arch Linux Repository Builder  (Factory)       ║\n'
+  printf '║      Offline Arch Linux Repository Builder  (Factory)        ║\n'
   printf '╚══════════════════════════════════════════════════════════════╝\n'
   printf '%s\n' "${RESET}"
 }

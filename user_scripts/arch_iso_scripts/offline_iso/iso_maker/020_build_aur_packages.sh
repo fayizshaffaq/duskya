@@ -147,7 +147,7 @@ trap '_cleanup' EXIT
 _print_logo() {
     printf '\n%s' "${BOLD}${CYAN}"
     printf '╔══════════════════════════════════════════════════════════════╗\n'
-    printf '║       AUR Package Builder for Offline ISO  (Factory)        ║\n'
+    printf '║       AUR Package Builder for Offline ISO  (Factory)         ║\n'
     printf '╚══════════════════════════════════════════════════════════════╝\n'
     printf '%s\n' "${RESET}"
 }
