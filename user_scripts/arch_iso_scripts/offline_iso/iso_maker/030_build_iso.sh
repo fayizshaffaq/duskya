@@ -81,5 +81,13 @@ echo -e "\n\e[1;32m==>\e[0m \e[1mSTARTING BUILD PROCESS\e[0m"
 # builds if the profile lists multiple modes.
 "$MKARCHISO_CUSTOM" -v -m iso -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
 
+# --- 5. PERMISSIONS RESTORATION ---
+# mkarchiso runs as root, resulting in root ownership of the output folder.
+# We hand ownership back to the standard user who invoked sudo.
+if [[ -n "${SUDO_USER:-}" ]]; then
+    echo "  -> Restoring ownership of the output directory to user: $SUDO_USER..."
+    chown -R "$SUDO_USER:$SUDO_USER" "$OUT_DIR"
+fi
+
 echo -e "\n\e[1;32m[SUCCESS]\e[0m \e[1mISO generation complete!\e[0m"
 echo "Your bootable ISO is located in: $OUT_DIR"
